@@ -54,3 +54,34 @@ The codes with CUDA should be compatible with Windows, Mac, and other Linux dist
 pip install -r requirements.txt
 pip install ./nnUNet
 ```
+
+## Train
+To train any of the models, the dataset should be in the nnunetv2 format. 
+```commandline
+├── nnunet_raw
+│   ├── Dataset030_AbdomenMR
+│   │   ├── imagesTr
+│   │   │   ├── amos_0507_0000.nii.gz
+│   │   │   ├── ...
+│   │   ├── labelsTr
+│   │   │   ├── amos_0507.nii.gz
+│   │   │   ├── ...
+│   │   ├── imagesTs
+│   │   │   ├── amos_0507_0000.nii.gz
+│   │   │   ├── ...
+│   │   ├── labelsTs
+│   │   │   ├── amos_0507.nii.gz
+│   │   │   ├── ...
+```
+
+Then run the following code to train a model:
+```commandline
+python train.py --device 1 --dataset_name  Dataset030_AbdomenMR --tr nnUNetTrainerM2NetP --model 2d --num_epochs 250
+```
+For more variable please run `python train.py --help`
+
+## Test
+For test execute the following command:
+```commandline
+
+```
