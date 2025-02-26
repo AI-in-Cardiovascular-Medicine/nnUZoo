@@ -7,7 +7,7 @@ from argparse import ArgumentParser
 
 
 parser = ArgumentParser()
-parser.add_argument("--dataset_name", default="Dataset005_mri_fat")
+parser.add_argument("--dataset_name", default="Dataset030_AbdomenMR")
 parser.add_argument("--base_dir", default="NNUNET_OUTPUT")
 parser.add_argument("--tr", default="nnUNetTrainer")
 parser.add_argument("--model", default="2d")

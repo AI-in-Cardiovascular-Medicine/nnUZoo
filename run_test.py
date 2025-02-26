@@ -4,9 +4,9 @@ import sys
 from argparse import ArgumentParser
 
 parser = ArgumentParser()
-parser.add_argument("--dataset_name", default="Dataset005_mri_fat")
+parser.add_argument("--dataset_name", default="Dataset030_AbdomenMR")
 parser.add_argument("--model_name", default="M2Net")
-parser.add_argument("--base_dir", default="NNUNET_OUTPUT")
+parser.add_argument("--base_dir", default="./NNUNET_OUTPUT")
 parser.add_argument("--device", type=int, default=1)
 
 trainer_name = dict(
