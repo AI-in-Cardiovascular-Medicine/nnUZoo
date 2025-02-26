@@ -5,17 +5,12 @@
 
 ## Contents
 - [Overview](#overview-)
-- [Project Online Page & Test](#project-online-page--test)
 - [System Requirements](#system-requirements)
 - [Installation Guide](#installation-guide)
-- [Preprocessing](#preprocessing)
 - [Train](#train)
-- [Evaluate model](#evaluate-model)
-- [Inference](#inference)
-- [Inference On Samples](#inference-on-samples-data)
-- [Explainability](#explainability)
-- [Result Plots](#result-plots)
-- [DockerFiles](#dockerfiles)
+- [Test](#test)
+- [X2Net](#x2net-)
+- [Results](#results)
 - [License](#license)
 - [Citation](#citation)
 
@@ -113,3 +108,22 @@ Here is the dice scores of various models:
 Here is the outcome of various models on all datasets:
 
 <img src="assets/model_results.jpg">
+
+
+## License
+This project is covered under the [Apache License 2.0](LICENSE) License.
+
+
+## Citation
+Please kindly cite the following paper if you use this repository.
+```commandline
+@article{Mohammadi2025,
+  author = {Mohammadi Kazaj, P., Baj, G.,  Yazdan, S., Stark, A. W., Valenzuela, W., Siontis, G. C. M., zaidi, H., Reyes, M., Gräni, C., & Shiri, I.,},
+  title = {X2Net : Redefining Conventional U2Net and nnUNet as a Next-Generation Model with Mamba and Transformers in nnUZoo},
+  journal = {},
+  year = {2024},
+  note = {In submission},
+  doi = {},
+  pmid = {}
+}
+```
