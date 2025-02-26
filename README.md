@@ -86,6 +86,10 @@ For test execute the following command:
 python run_test.py --dataset_name Dataset030_AbdomenMR --device 1 --model_name M2Net 
 ```
 For more variable please run `python train.py --help`
+## X2Net 
+Here we present the graph of the two of our proposed models:
+
+<img src="assets/X2Net_graphs.png">
 
 ## Results
 Here is the dice scores of various models:
