@@ -23,7 +23,7 @@ if __name__ == '__main__':
     output_path = join(nnunet_raw, args.dataset_name, f"imagesTs_{args.model_name}_Pred")
 
     res = os.system(
-        f"python code_inference.py --device cuda:1 --model_path  {model_path} --input {input_path} --output {output_path} --ext {'.png' if args.dataset_name == 'Dataset032_NeurlPSCell' else '.gz'}")
+        f"python code_inference.py --device cuda:{args.device} --model_path  {model_path} --input {input_path} --output {output_path} --ext {'.png' if args.dataset_name == 'Dataset032_NeurlPSCell' else '.gz'}")
     if res != 0:
         print(
             f"[Error] Couldn't do {args.model_name} on {args.dataset_name} with command: \n python code_inference.py --device cuda:0 --model_path  {model_path} --input {input_path} --output {output_path} --ext {'.png' if args.dataset_name == 'Dataset032_NeurlPSCell' else '.gz'}")
@@ -32,7 +32,7 @@ if __name__ == '__main__':
     summary_path = join(model_path, 'test_summary.json')
     if args.dataset_name != 'Dataset032_NeurlPSCell':
         res = os.system(
-            f"CUDA_VISIBLE_DEVICES=1 nnUNetv2_evaluate_folder  {input_lbl_path} {output_path} -djfile {join(model_path, 'dataset.json')} -pfile {join(model_path, 'plans.json')} -o {summary_path}")
+            f"CUDA_VISIBLE_DEVICES={args.device} nnUNetv2_evaluate_folder  {input_lbl_path} {output_path} -djfile {join(model_path, 'dataset.json')} -pfile {join(model_path, 'plans.json')} -o {summary_path}")
     else:
         res = os.system(
             f"python compute_cell_metric.py --gt_path {input_lbl_path} --seg_path {output_path} --save_path {summary_path}"
