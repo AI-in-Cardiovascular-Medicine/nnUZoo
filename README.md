@@ -139,9 +139,9 @@ Please kindly cite the following paper if you use this repository.
 ```commandline
 @article{Mohammadi2025,
   author = {Mohammadi Kazaj, P., Baj, G.,  Yazdan, S., Stark, A. W., Valenzuela, W., Siontis, G. C. M., zaidi, H., Reyes, M., Gräni, C., & Shiri, I.,},
-  title = {X2Net : Redefining Conventional U2Net and nnUNet as a Next-Generation Model with Mamba and Transformers in nnUZoo},
+  title = {From Claims to Evidence: A Unified Framework and Critical Analysis of CNN vs. Transformer vs. Mamba in  Medical Image Segmentation},
   journal = {},
-  year = {2024},
+  year = {2025},
   note = {In submission},
   doi = {},
   pmid = {}
