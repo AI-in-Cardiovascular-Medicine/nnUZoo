@@ -150,4 +150,11 @@ Please kindly cite the following paper if you use this repository.
   url       = {https://arxiv.org/abs/2503.01306}
 }
 
+
+```
+```
+Kazaj PM, Baj G, Salimi Y, Stark AW, Valenzuela W, Siontis GCM, Zaidi H, Reyes M, Graeni C, Shiri I. 
+From Claims to Evidence: A Unified Framework and Critical Analysis of CNN vs. Transformer vs. Mamba in Medical Image Segmentation. 
+arXiv preprint arXiv:2503.01306. 2025. Available from: https://arxiv.org/abs/2503.01306
+
 ```
