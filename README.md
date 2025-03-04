@@ -137,12 +137,17 @@ This project is covered under the [Apache License 2.0](LICENSE) License.
 Please kindly cite the following paper if you use this repository.
 
 ```commandline
-@misc{Mohammadi2025,
-      title={From Claims to Evidence: A Unified Framework and Critical Analysis of CNN vs. Transformer vs. Mamba in  Medical Image Segmentation}, 
-      author={Mohammadi Kazaj, P., Baj, G.,  Yazdan, S., Stark, A. W., Valenzuela, W., Siontis, G. C. M., zaidi, H., Reyes, M., Gräni, C., & Shiri, I.,},
-      year={2025},
-      eprint={2503.01306},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI}
+@article{kazaj2025claims,
+  author    = {Pooya Mohammadi Kazaj and Giovanni Baj and Yazdan Salimi and Anselm W. Stark and Waldo Valenzuela
+                 and George C. M. Siontis and Habib Zaidi and Mauricio Reyes and Christoph Graeni and Isaac Shiri},
+  title     = {From Claims to Evidence: A Unified Framework and Critical Analysis of CNN vs. Transformer vs. Mamba in Medical Image Segmentation},
+  journal   = {arXiv preprint},
+  volume    = {2503.01306},
+  year      = {2025},
+  archivePrefix = {arXiv},
+  primaryClass = {eess.IV},
+  doi       = {10.48550/arXiv.2503.01306},
+  url       = {https://arxiv.org/abs/2503.01306}
 }
+
 ```
