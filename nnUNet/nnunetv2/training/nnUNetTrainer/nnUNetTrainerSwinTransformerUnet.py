@@ -1,0 +1,105 @@
+from os.path import join
+
+import torch
+from batchgenerators.utilities.file_and_folder_operations import join
+from nnunetv2.nets.swt import get_swin_transformer_unet
+from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
+from torch import nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torchinfo import summary
+
+
+class nnUNetTrainerSwinTransformerUnet(nnUNetTrainer):
+    """ Swin-UMamba """
+
+    def __init__(self, plans: dict, configuration: str, fold: int, dataset_json: dict, unpack_dataset: bool = True,
+                 device: torch.device = torch.device('cuda'), num_epochs: int = 250):
+        super().__init__(plans, configuration, fold, dataset_json, unpack_dataset, device, num_epochs=num_epochs)
+        self.initial_lr = 1e-4
+        self.weight_decay = 5e-2
+        self.enable_deep_supervision = False
+        self.freeze_encoder_epochs = -1  # training from scratch
+        self.early_stop_epoch = 10
+
+    @staticmethod
+    def build_network_architecture(
+            plans_manager: PlansManager,
+            dataset_json,
+            configuration_manager: ConfigurationManager,
+            num_input_channels,
+            enable_deep_supervision: bool = False,
+            use_pretrain: bool = True,
+    ) -> nn.Module:
+
+        model = get_swin_transformer_unet(
+            plans_manager,
+            dataset_json,
+            configuration_manager,
+            num_input_channels,
+            deep_supervision=enable_deep_supervision,
+            use_pretrain=True,
+        )
+        summary(model, input_size=[1, num_input_channels] + configuration_manager.patch_size)
+
+        return model
+
+    def _get_deep_supervision_scales(self):
+        if self.enable_deep_supervision:
+            deep_supervision_scales = [[1.0, 1.0]] * 7
+        else:
+            deep_supervision_scales = None  # for train and val_transforms
+        return deep_supervision_scales
+
+    def configure_optimizers(self):
+        optimizer = AdamW(
+            self.network.parameters(),
+            lr=self.initial_lr,
+            weight_decay=self.weight_decay,
+            eps=1e-5,
+            betas=(0.9, 0.999),
+        )
+        scheduler = CosineAnnealingLR(optimizer, T_max=self.num_epochs, eta_min=1e-6)
+
+        self.print_to_log_file(f"Using optimizer {optimizer}")
+        self.print_to_log_file(f"Using scheduler {scheduler}")
+
+        return optimizer, scheduler
+
+    def on_epoch_end(self):
+        current_epoch = self.current_epoch
+        if (current_epoch + 1) % self.save_every == 0:
+            self.save_checkpoint(join(self.output_folder, f'checkpoint_{current_epoch}.pth'))
+        super().on_epoch_end()
+
+    def on_train_epoch_start(self):
+        if self.freeze_encoder_epochs != -1:
+            # freeze the encoder if the epoch is less than 10
+            if self.current_epoch < self.freeze_encoder_epochs:
+                self.print_to_log_file("Freezing the encoder")
+                if self.is_ddp:
+                    self.network.module.freeze_encoder()
+                else:
+                    self.network.freeze_encoder()
+            else:
+                self.print_to_log_file("Unfreezing the encoder")
+                if self.is_ddp:
+                    self.network.module.unfreeze_encoder()
+                else:
+                    self.network.unfreeze_encoder()
+        super().on_train_epoch_start()
+
+    def set_deep_supervision_enabled(self, enabled: bool):
+        """
+        This function is specific for the default architecture in nnU-Net. If you change the architecture, there are
+        chances you need to change this as well!
+        """
+        if self.is_ddp:
+            self.network.module.deep_supervision = enabled
+        else:
+            self.network.deep_supervision = enabled
+
+    def plot_network_architecture(self):
+        print('[INFO] Started plotting')
+        print("[INFO] plot is successfully finished!")
