@@ -1,6 +1,6 @@
 # nnUZoo
 
-<img src="assets/main_img.jpg">
+<img src="nnUZoo-Assets/main_img.jpg">
 
 ## Contents
 
@@ -102,7 +102,7 @@ For more variable please run `python train.py --help`
 
 Here we present the graph of the two of our proposed models:
 
-<img src="assets/X2Net_graphs.png">
+<img src="nnUZoo-Assets/X2Net_graphs.png">
 
 ## Results
 
@@ -126,7 +126,7 @@ Here is the dice scores of various models:
 
 Here is the outcome of various models on all datasets:
 
-<img src="assets/model_results.jpg">
+<img src="nnUZoo-Assets/model_results.jpg">
 
 ## License
 
