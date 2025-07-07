@@ -1,13 +1,12 @@
 [project]
 name = "nnunetv2"
-version = "2.1.1"
-requires-python = ">=3.9"
-description = "nnU-Net is a framework for out-of-the box image segmentation."
+version = "1.0.0"
+requires-python = ">=3.10"
+description = "nnUZoo is based on famus nnU-Net and it's a framework for out-of-the box image segmentation, translation, regression, etc with various models ranging from CNN, transformers, and Mamba."
 readme = "readme.md"
 license = { file = "LICENSE" }
 authors = [
-    { name = "Fabian Isensee", email = "f.isensee@dkfz-heidelberg.de" },
-    { name = "Helmholtz Imaging Applied Computer Vision Lab" }
+    { name = "Pooya Mohammadi Kazaj", email = "pooyamohammadikazaj@gmail.com" }
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -15,7 +14,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Intended Audience :: Healthcare Industry",
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Image Recognition",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
@@ -26,11 +24,12 @@ keywords = [
     'semantic segmentation',
     'medical image analysis',
     'medical image segmentation',
+    'nnUZoo',
     'nnU-Net',
     'nnunet'
 ]
 dependencies = [
-    "torch>=2.1.2",
+    "torch==2.4.0", # Required for mamba
     "acvl-utils>=0.2,<0.3", # 0.3 may bring breaking changes. Careful!
     "dynamic-network-architectures>=0.3.1,<0.4", # 0.3.1 and lower are supported, 0.4 may have breaking changes. Let's be careful here
     "tqdm",
@@ -53,12 +52,15 @@ dependencies = [
     "batchgeneratorsv2>=0.2",
     "einops",
     "monai>=1.4.0",
-    "opencv-python"
+    "opencv-python",
+    "deep_utils",
+    "torchinfo",
+    "numba",
 ]
 
 [project.urls]
-homepage = "https://github.com/MIC-DKFZ/nnUNet"
-repository = "https://github.com/MIC-DKFZ/nnUNet"
+homepage = "https://github.com/AI-in-Cardiovascular-Medicine/nnUZoo"
+repository = "https://github.com/AI-in-Cardiovascular-Medicine/nnUZoo"
 
 [project.scripts]
 nnUNetv2_plan_and_preprocess = "nnunetv2.experiment_planning.plan_and_preprocess_entrypoints:plan_and_preprocess_entry"
@@ -96,5 +98,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.codespell]
 skip = '.git,*.pdf,*.svg'
-#
-# ignore-words-list = ''
+
