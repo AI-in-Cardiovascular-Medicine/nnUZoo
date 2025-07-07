@@ -3,7 +3,7 @@ name = "nnunetv2"
 version = "1.0.0"
 requires-python = ">=3.10"
 description = "nnUZoo is based on famus nnU-Net and it's a framework for out-of-the box image segmentation, translation, regression, etc with various models ranging from CNN, transformers, and Mamba."
-readme = "readme.md"
+readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
     { name = "Pooya Mohammadi Kazaj", email = "pooyamohammadikazaj@gmail.com" }
