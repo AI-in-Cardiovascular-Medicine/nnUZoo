@@ -13,9 +13,11 @@
 #    limitations under the License.
 import multiprocessing
 import shutil
+import time
+import traceback
 from time import sleep
 from typing import Union, Tuple
-
+from os.path import join, split, exists
 import nnunetv2
 import numpy as np
 from batchgenerators.utilities.file_and_folder_operations import *
@@ -25,8 +27,8 @@ from nnunetv2.preprocessing.resampling.default_resampling import compute_new_sha
 from nnunetv2.utilities.dataset_name_id_conversion import maybe_convert_to_dataset_name
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
-from nnunetv2.utilities.utils import get_identifiers_from_splitted_dataset_folder, \
-    create_lists_from_splitted_dataset_folder, get_filenames_of_train_images_and_targets
+from nnunetv2.utilities.utils import get_identifiers_from_split_dataset_folder, \
+    create_lists_from_split_dataset_folder, get_filenames_of_train_images_and_targets
 from tqdm import tqdm
 
 
@@ -47,6 +49,7 @@ class DefaultPreprocessor(object):
             seg = np.copy(seg)
 
         has_seg = seg is not None
+        # print(f"[INFO] has_seg: {has_seg}")
 
         # apply transpose_forward, this also needs to be applied to the spacing!
         data = data.transpose([0, *[i + 1 for i in plans_manager.transpose_forward]])
@@ -58,7 +61,10 @@ class DefaultPreprocessor(object):
         shape_before_cropping = data.shape[1:]
         properties['shape_before_cropping'] = shape_before_cropping
         # this command will generate a segmentation. This is important because of the nonzero mask which we may need
-        data, seg, bbox = crop_to_nonzero(data, seg)
+        if has_seg:
+            data, seg, bbox = crop_to_nonzero(data, seg)
+        else:
+            data, _, bbox = crop_to_nonzero(data)
         properties['bbox_used_for_cropping'] = bbox
         # print(data.shape, seg.shape)
         properties['shape_after_cropping_and_before_resampling'] = data.shape[1:]
@@ -81,9 +87,12 @@ class DefaultPreprocessor(object):
         # print('current shape', data.shape[1:], 'current_spacing', original_spacing,
         #       '\ntarget shape', new_shape, 'target_spacing', target_spacing)
         old_shape = data.shape[1:]
+        tic = time.time()
         data = configuration_manager.resampling_fn_data(data, new_shape, original_spacing, target_spacing)
-        seg = configuration_manager.resampling_fn_seg(seg, new_shape, original_spacing, target_spacing)
+        if has_seg:
+            seg = configuration_manager.resampling_fn_seg(seg, new_shape, original_spacing, target_spacing)
         if self.verbose:
+            print(f"[INFO] Resampling took {time.time() - tic} seconds!")
             print(f'old shape: {old_shape}, new_shape: {new_shape}, old_spacing: {original_spacing}, '
                   f'new_spacing: {target_spacing}, fn_data: {configuration_manager.resampling_fn_data}')
 
@@ -106,11 +115,15 @@ class DefaultPreprocessor(object):
             properties['class_locations'] = self._sample_foreground_locations(seg, collect_for_this,
                                                                                    verbose=self.verbose)
             seg = self.modify_seg_fn(seg, plans_manager, dataset_json, configuration_manager)
-        if np.max(seg) > 127:
-            seg = seg.astype(np.int16)
+        if has_seg:
+            if np.max(seg) > 127:
+                seg = seg.astype(np.int16)
+            else:
+                seg = seg.astype(np.int8)
+        if not has_seg:
+            return data, None
         else:
-            seg = seg.astype(np.int8)
-        return data, seg
+            return data, seg
 
     def run_case(self, image_files: List[str], seg_file: Union[str, None], plans_manager: PlansManager,
                  configuration_manager: ConfigurationManager,
@@ -122,30 +135,57 @@ class DefaultPreprocessor(object):
         so when we export we need to run the following order: resample -> crop -> transpose (we could also run
         transpose at a different place, but reverting the order of operations done during preprocessing seems cleaner)
         """
-        if isinstance(dataset_json, str):
-            dataset_json = load_json(dataset_json)
+        # print("Started")
+        try:
+            if isinstance(dataset_json, str):
+                dataset_json = load_json(dataset_json)
 
-        rw = plans_manager.image_reader_writer_class()
+            rw = plans_manager.image_reader_writer_class()
 
-        # load image(s)
-        data, data_properties = rw.read_images(image_files)
+            # load image(s)
+            data, data_properties = rw.read_images(image_files)
 
-        # if possible, load seg
-        if seg_file is not None:
-            seg, _ = rw.read_seg(seg_file)
-        else:
-            seg = None
-
-        data, seg = self.run_case_npy(data, seg, data_properties, plans_manager, configuration_manager,
-                                      dataset_json)
+            # if possible, load seg
+            if seg_file is not None:
+                seg, _ = rw.read_seg(seg_file)
+            else:
+                seg = None
+            tic = time.time()
+            data, seg = self.run_case_npy(data, seg, data_properties, plans_manager, configuration_manager,
+                                          dataset_json)
+            if self.verbose:
+                print(f"[INFO] Get numpy data in {time.time() - tic}")
+        except Exception as e:
+            raise Exception(f"Error is {traceback.format_exc()}")
         return data, seg, data_properties
 
     def run_case_save(self, output_filename_truncated: str, image_files: List[str], seg_file: str,
                       plans_manager: PlansManager, configuration_manager: ConfigurationManager,
-                      dataset_json: Union[dict, str]):
-        data, seg, properties = self.run_case(image_files, seg_file, plans_manager, configuration_manager, dataset_json)
-        # print('dtypes', data.dtype, seg.dtype)
-        np.savez_compressed(output_filename_truncated + '.npz', data=data, seg=seg)
+                      dataset_json: Union[dict, str], continue_: bool = False):
+        # print("[INFO] We are here :)")
+        if continue_ and (exists(output_filename_truncated + '.npz') or exists(output_filename_truncated + '.npy')) and exists(output_filename_truncated + '.pkl'):
+            print(f"file {output_filename_truncated} exists. Continue ...")
+            return
+
+        # print(f"file {output_filename_truncated} does not exist")
+        if (exists(output_filename_truncated + '.npz') or exists(output_filename_truncated + '.npy')) and not exists(output_filename_truncated + '.pkl'):
+            rw = plans_manager.image_reader_writer_class()
+            _, properties = rw.read_images(image_files)
+            data, seg = None, None
+        else:
+            # print(f"Extracting data for {image_files} and {seg_file}")
+            data, seg, properties = self.run_case(image_files, seg_file, plans_manager, configuration_manager,
+                                                  dataset_json)
+            # print(f"data: {data.shape}, seg: {seg}")
+
+        if seg is not None:
+            np.savez_compressed(output_filename_truncated + '.npz', data=data, seg=seg)
+        else:
+            # SSL saving the data in unpack format.
+            # np.savez_compressed(output_filename_truncated + '.npz', data=data)
+            if not exists(output_filename_truncated + '.npy'):
+                np.save(output_filename_truncated + '.npy', data)
+        # print("saving ")
         write_pickle(properties, output_filename_truncated + '.pkl')
 
     @staticmethod
@@ -181,18 +221,22 @@ class DefaultPreprocessor(object):
                    foreground_intensity_properties_per_channel: dict) -> np.ndarray:
         for c in range(data.shape[0]):
             scheme = configuration_manager.normalization_schemes[c]
+            all_kwargs = configuration_manager.normalization_kwargs
+            kwargs = all_kwargs[c] if all_kwargs is not None else dict()
+
             normalizer_class = recursive_find_python_class(join(nnunetv2.__path__[0], "preprocessing", "normalization"),
                                                            scheme,
                                                            'nnunetv2.preprocessing.normalization')
+            # print(f"normalizer_class is: {normalizer_class}")
             if normalizer_class is None:
                 raise RuntimeError(f'Unable to locate class \'{scheme}\' for normalization')
             normalizer = normalizer_class(use_mask_for_norm=configuration_manager.use_mask_for_norm[c],
-                                          intensityproperties=foreground_intensity_properties_per_channel[str(c)])
-            data[c] = normalizer.run(data[c], seg[0])
+                                          intensityproperties=foreground_intensity_properties_per_channel.get(str(c), dict()))
+            data[c] = normalizer.run(data[c], seg[0] if seg is not None else None, **kwargs)
         return data
 
     def run(self, dataset_name_or_id: Union[int, str], configuration_name: str, plans_identifier: str,
-            num_processes: int):
+            num_processes: int, continue_:bool = False):
         """
         data identifier = configuration name in plans. EZ.
         """
@@ -209,33 +253,37 @@ class DefaultPreprocessor(object):
 
         if self.verbose:
             print(f'Preprocessing the following configuration: {configuration_name}')
-        if self.verbose:
-            print(configuration_manager)
+            print("configuration_manager:", configuration_manager)
 
         dataset_json_file = join(nnUNet_preprocessed, dataset_name, 'dataset.json')
         dataset_json = load_json(dataset_json_file)
 
         output_directory = join(nnUNet_preprocessed, dataset_name, configuration_manager.data_identifier)
 
-        if isdir(output_directory):
+        if isdir(output_directory) and not continue_:
             shutil.rmtree(output_directory)
 
         maybe_mkdir_p(output_directory)
 
         dataset = get_filenames_of_train_images_and_targets(join(nnUNet_raw, dataset_name), dataset_json)
-
+        # k = "f7c3e261387d401aa95b35496b57dd16" #"USZ-093__PT"
+        # self.run_case_save(join(output_directory, k), dataset[k]['images'], dataset[k]['label'],
+        #   plans_manager, configuration_manager,
+        #   dataset_json, False)
+        # dataset = {"f7c3e261387d401aa95b35496b57dd16": dataset["f7c3e261387d401aa95b35496b57dd16"]}
         # identifiers = [os.path.basename(i[:-len(dataset_json['file_ending'])]) for i in seg_fnames]
         # output_filenames_truncated = [join(output_directory, i) for i in identifiers]
 
         # multiprocessing magic.
-        r = []
+        tasks = []
         with multiprocessing.get_context("spawn").Pool(num_processes) as p:
-            for k in dataset.keys():
-                r.append(p.starmap_async(self.run_case_save,
+            for k in tqdm(dataset.keys(), desc="Adding all keys to run_case_save"):
+                tasks.append(p.starmap_async(self.run_case_save,
                                          ((join(output_directory, k), dataset[k]['images'], dataset[k]['label'],
                                            plans_manager, configuration_manager,
-                                           dataset_json),)))
+                                           dataset_json, continue_),)))
             remaining = list(range(len(dataset)))
+            print(f"remaining: {len(remaining)}, all_tasks: {len(tasks)}")
             # p is pretty nifti. If we kill workers they just respawn but don't do any work.
             # So we need to store the original pool of workers.
             workers = [j for j in p._pool]
@@ -250,10 +298,10 @@ class DefaultPreprocessor(object):
                                            'by your OS due to running out of RAM. If you don\'t see '
                                            'an error message, out of RAM is likely the problem. In that case '
                                            'reducing the number of workers might help')
-                    done = [i for i in remaining if r[i].ready()]
-                    for _ in done:
+                    dones = [i for i in remaining if tasks[i].ready()]
+                    for _ in dones:
                         pbar.update()
-                    remaining = [i for i in remaining if i not in done]
+                    remaining = [i for i in remaining if i not in dones]
                     sleep(0.1)
 
     def modify_seg_fn(self, seg: np.ndarray, plans_manager: PlansManager, dataset_json: dict,

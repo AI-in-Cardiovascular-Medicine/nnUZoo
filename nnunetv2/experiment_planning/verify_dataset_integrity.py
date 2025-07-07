@@ -14,6 +14,7 @@
 #    limitations under the License.
 import multiprocessing
 import re
+import time
 from multiprocessing import Pool
 from typing import Type
 
@@ -25,7 +26,7 @@ from nnunetv2.imageio.base_reader_writer import BaseReaderWriter
 from nnunetv2.imageio.reader_writer_registry import determine_reader_writer_from_dataset_json
 from nnunetv2.paths import nnUNet_raw
 from nnunetv2.utilities.label_handling.label_handling import LabelManager
-from nnunetv2.utilities.utils import get_identifiers_from_splitted_dataset_folder, \
+from nnunetv2.utilities.utils import get_identifiers_from_split_dataset_folder, \
     get_filenames_of_train_images_and_targets
 
 
@@ -48,7 +49,6 @@ def check_cases(image_files: List[str], label_file: str, expected_num_channels: 
                 readerclass: Type[BaseReaderWriter]) -> bool:
     rw = readerclass()
     ret = True
-
     images, properties_image = rw.read_images(image_files)
     segmentation, properties_seg = rw.read_seg(label_file)
 
@@ -76,7 +76,7 @@ def check_cases(image_files: List[str], label_file: str, expected_num_channels: 
     if not np.allclose(spacing_seg, spacing_images):
         print('Error: Spacing mismatch between segmentation and corresponding images. \nSpacing images: %s. '
               '\nSpacing seg: %s. \nImage files: %s. \nSeg file: %s\n' %
-              (shape_image, shape_seg, image_files, label_file))
+              (spacing_images, spacing_seg, image_files, label_file))
         ret = False
 
     # check modalities
@@ -93,7 +93,7 @@ def check_cases(image_files: List[str], label_file: str, expected_num_channels: 
         if not np.allclose(affine_image, affine_seg):
             print('WARNING: Affine is not the same for image and seg! \nAffine image: %s \nAffine seg: %s\n'
                   'Image files: %s. \nSeg file: %s.\nThis can be a problem but doesn\'t have to be. Please run '
-                  'nnUNet_plot_dataset_pngs to verify if everything is OK!\n'
+                  'nnUNetv2_plot_overlay_pngs to verify if everything is OK!\n'
                   % (affine_image, affine_seg, image_files, label_file))
 
     # sitk checks
@@ -125,6 +125,7 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
     :param folder:
     :return:
     """
+    print(f"[INFO] Starting to verify_dataset_integrity on {folder} with {num_processes} processors")
     assert isfile(join(folder, "dataset.json")), f"There needs to be a dataset.json file in folder, folder={folder}"
     dataset_json = load_json(join(folder, "dataset.json"))
 
@@ -179,6 +180,8 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
         # old code that uses imagestr and labelstr folders
         labelfiles = subfiles(join(folder, 'labelsTr'), suffix=file_ending, join=False)
         label_identifiers = [i[:-len(file_ending)] for i in labelfiles]
+        # from deep_utils import DirUtils
+        # label_identifiers = [item[:-len(file_ending)] for item in DirUtils.list_dir_full_path(join(folder, "labelsTr"), get_full_path=False)]
         labels_present = [i in label_identifiers for i in dataset.keys()]
         missing = [i for j, i in enumerate(dataset.keys()) if not labels_present[j]]
         assert all(labels_present), f'not all training cases have a label file in labelsTr. Fix that. Missing: {missing}'
@@ -201,15 +204,16 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
 
     # check whether only the desired labels are present
     with multiprocessing.get_context("spawn").Pool(num_processes) as p:
+        print("[INFO] Verifying labels")
         result = p.starmap(
             verify_labels,
-            zip([join(folder, 'labelsTr', i) for i in labelfiles], [reader_writer_class] * len(labelfiles),
-                [expected_labels] * len(labelfiles))
+            zip(labelfiles, [reader_writer_class] * len(labelfiles), [expected_labels] * len(labelfiles))
         )
         if not all(result):
             raise RuntimeError(
                 'Some segmentation images contained unexpected labels. Please check text output above to see which one(s).')
 
+        print("[INFO] Verifying cases")
         # check whether shapes and spacings match between images and labels
         result = p.starmap(
             check_cases,

@@ -4,13 +4,12 @@ from typing import Union, List, Tuple, Type
 
 import numpy as np
 import torch
-from acvl_utils.cropping_and_padding.bounding_boxes import bounding_box_to_slice
 from batchgenerators.utilities.file_and_folder_operations import join
 
 import nnunetv2
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 from nnunetv2.utilities.helpers import softmax_helper_dim0
-
+from acvl_utils.cropping_and_padding.bounding_boxes import  insert_crop_into_image
 from typing import TYPE_CHECKING
 
 # see https://adamj.eu/tech/2021/05/13/python-type-hints-how-to-fix-circular-imports/
@@ -20,12 +19,13 @@ if TYPE_CHECKING:
 
 class LabelManager(object):
     def __init__(self, label_dict: dict, regions_class_order: Union[List[int], None], force_use_labels: bool = False,
-                 inference_nonlin=None):
+                 inference_nonlin=None, target_type:str = "segmentation"):
         self._sanity_check(label_dict)
         self.label_dict = label_dict
         self.regions_class_order = regions_class_order
         self._force_use_labels = force_use_labels
-
+        self._num_segmentation_heads = None
+        self.target_type = target_type
         if force_use_labels:
             self._has_regions = False
         else:
@@ -53,7 +53,8 @@ class LabelManager(object):
             raise RuntimeError('Background label not declared (remember that this should be label 0!)')
         bg_label = label_dict['background']
         if isinstance(bg_label, (tuple, list)):
-            raise RuntimeError(f"Background label must be 0. Not a list. Not a tuple. Your background label: {bg_label}")
+            raise RuntimeError(
+                f"Background label must be 0. Not a list. Not a tuple. Your background label: {bg_label}")
         assert int(bg_label) == 0, f"Background label must be 0. Your background label: {bg_label}"
         # not sure if we want to allow regions that contain background. I don't immediately see how this could cause
         # problems so we allow it for now. That doesn't mean that this is explicitly supported. It could be that this
@@ -140,6 +141,7 @@ class LabelManager(object):
 
         return probabilities
 
+    @torch.inference_mode()
     def convert_probabilities_to_segmentation(self, predicted_probabilities: Union[np.ndarray, torch.Tensor]) -> \
             Union[np.ndarray, torch.Tensor]:
         """
@@ -170,14 +172,25 @@ class LabelManager(object):
             for i, c in enumerate(self.regions_class_order):
                 segmentation[predicted_probabilities[i] > 0.5] = c
         else:
+            # numpy is faster than torch. :facepalm:
+            is_numpy = isinstance(predicted_probabilities, np.ndarray)
+            if not is_numpy:
+                predicted_probabilities = predicted_probabilities.numpy()
             segmentation = predicted_probabilities.argmax(0)
+            if not is_numpy:
+                segmentation = torch.from_numpy(segmentation)
 
         return segmentation
 
+    @torch.inference_mode()
     def convert_logits_to_segmentation(self, predicted_logits: Union[np.ndarray, torch.Tensor]) -> \
             Union[np.ndarray, torch.Tensor]:
         input_is_numpy = isinstance(predicted_logits, np.ndarray)
-        probabilities = self.apply_inference_nonlin(predicted_logits)
+        # we can skip this step if we do not have region. Argmax is the same between logits or probabilities
+        if self.has_regions:
+            probabilities = self.apply_inference_nonlin(predicted_logits)
+        else:
+            probabilities = predicted_logits
         if input_is_numpy and isinstance(probabilities, torch.Tensor):
             probabilities = probabilities.cpu().numpy()
         return self.convert_probabilities_to_segmentation(probabilities)
@@ -204,8 +217,7 @@ class LabelManager(object):
         if not self.has_regions:
             probs_reverted_cropping[0] = 1
 
-        slicer = bounding_box_to_slice(bbox)
-        probs_reverted_cropping[tuple([slice(None)] + list(slicer))] = predicted_probabilities
+        probs_reverted_cropping = insert_crop_into_image(probs_reverted_cropping, predicted_probabilities, bbox)
         return probs_reverted_cropping
 
     @staticmethod
@@ -228,10 +240,19 @@ class LabelManager(object):
 
     @property
     def num_segmentation_heads(self):
+        if self._num_segmentation_heads is not None:
+            return self._num_segmentation_heads
         if self.has_regions:
             return len(self.foreground_regions)
         else:
-            return len(self.all_labels)
+            if self.target_type == "translation":
+                return len(self.all_labels) - 1
+            else:
+                return len(self.all_labels)
+
+    @num_segmentation_heads.setter
+    def num_segmentation_heads(self, value: int):
+        self._num_segmentation_heads = value
 
 
 def get_labelmanager_class_from_plans(plans: dict) -> Type[LabelManager]:

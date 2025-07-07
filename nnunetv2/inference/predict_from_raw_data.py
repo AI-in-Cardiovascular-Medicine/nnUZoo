@@ -5,7 +5,7 @@ import os
 from copy import deepcopy
 from time import sleep
 from typing import Tuple, Union, List, Optional
-
+import time
 import numpy as np
 import torch
 from acvl_utils.cropping_and_padding.padding import pad_nd_image
@@ -31,7 +31,7 @@ from nnunetv2.utilities.helpers import empty_cache, dummy_context
 from nnunetv2.utilities.json_export import recursive_fix_for_json_export
 from nnunetv2.utilities.label_handling.label_handling import determine_num_input_channels
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
-from nnunetv2.utilities.utils import create_lists_from_splitted_dataset_folder
+from nnunetv2.utilities.utils import create_lists_from_split_dataset_folder
 
 
 class nnUNetPredictor(object):
@@ -44,6 +44,8 @@ class nnUNetPredictor(object):
                  verbose: bool = False,
                  verbose_preprocessing: bool = False,
                  allow_tqdm: bool = True):
+
+        self.target_type = None
         self.verbose = verbose
         self.verbose_preprocessing = verbose_preprocessing
         self.allow_tqdm = allow_tqdm
@@ -75,6 +77,7 @@ class nnUNetPredictor(object):
             use_folds = nnUNetPredictor.auto_detect_available_folds(model_training_output_dir, checkpoint_name)
 
         dataset_json = load_json(join(model_training_output_dir, 'dataset.json'))
+        self.target_type = dataset_json.get('target_type', 'segmentation')
         plans = load_json(join(model_training_output_dir, 'plans.json'))
         plans_manager = PlansManager(plans)
 
@@ -101,8 +104,22 @@ class nnUNetPredictor(object):
         num_input_channels = determine_num_input_channels(plans_manager, configuration_manager, dataset_json)
         trainer_class = recursive_find_python_class(join(nnunetv2.__path__[0], "training", "nnUNetTrainer"),
                                                     trainer_name, 'nnunetv2.training.nnUNetTrainer')
-        network = trainer_class.build_network_architecture(plans_manager, dataset_json, configuration_manager,
-                                                           num_input_channels, enable_deep_supervision=False)
+        if trainer_class is None:
+            raise RuntimeError(f'Unable to locate trainer class {trainer_name} in nnunetv2.training.nnUNetTrainer. '
+                               f'Please place it there (in any .py file)!')
+
+        self.label_manager = plans_manager.get_label_manager(dataset_json)
+        # if self.target_type == "translation":
+        #     self.label_manager.num_segmentation_heads = self.label_manager.num_segmentation_heads - 1
+        network = trainer_class.build_network_architecture(
+            configuration_manager.network_arch_class_name,
+            configuration_manager.network_arch_init_kwargs,
+            configuration_manager.network_arch_init_kwargs_req_import,
+            num_input_channels,
+            self.label_manager.num_segmentation_heads,
+            enable_deep_supervision=False,
+            configuration_manager=configuration_manager,
+        )
         self.plans_manager = plans_manager
         self.configuration_manager = configuration_manager
         self.list_of_parameters = parameters
@@ -110,7 +127,8 @@ class nnUNetPredictor(object):
         self.dataset_json = dataset_json
         self.trainer_name = trainer_name
         self.allowed_mirroring_axes = inference_allowed_mirroring_axes
-        self.label_manager = plans_manager.get_label_manager(dataset_json)
+
+        # self.num_segmentation_heads = 1 if self.label_manager is None else self.label_manager.num_segmentation_heads
         if ('nnUNet_compile' in os.environ.keys()) and (os.environ['nnUNet_compile'].lower() in ('true', '1', 't')) \
                 and not isinstance(self.network, OptimizedModule):
             print('Using torch.compile')
@@ -119,7 +137,8 @@ class nnUNetPredictor(object):
     def manual_initialization(self, network: nn.Module, plans_manager: PlansManager,
                               configuration_manager: ConfigurationManager, parameters: Optional[List[dict]],
                               dataset_json: dict, trainer_name: str,
-                              inference_allowed_mirroring_axes: Optional[Tuple[int, ...]]):
+                              inference_allowed_mirroring_axes: Optional[Tuple[int, ...]],
+                              label_manager=None):
         """
         This is used by the nnUNetTrainer to initialize nnUNetPredictor for the final validation
         """
@@ -128,12 +147,15 @@ class nnUNetPredictor(object):
         self.list_of_parameters = parameters
         self.network = network
         self.dataset_json = dataset_json
+        self.target_type = dataset_json.get('target_type', 'segmentation')
         self.trainer_name = trainer_name
         self.allowed_mirroring_axes = inference_allowed_mirroring_axes
-        self.label_manager = plans_manager.get_label_manager(dataset_json)
+
+        self.label_manager = plans_manager.get_label_manager(dataset_json) if label_manager is None else label_manager
+
         allow_compile = True
         allow_compile = allow_compile and ('nnUNet_compile' in os.environ.keys()) and (
-                    os.environ['nnUNet_compile'].lower() in ('true', '1', 't'))
+                os.environ['nnUNet_compile'].lower() in ('true', '1', 't'))
         allow_compile = allow_compile and not isinstance(self.network, OptimizedModule)
         if isinstance(self.network, DistributedDataParallel):
             allow_compile = allow_compile and isinstance(self.network.module, OptimizedModule)
@@ -159,7 +181,7 @@ class nnUNetPredictor(object):
                                        num_parts: int = 1,
                                        save_probabilities: bool = False):
         if isinstance(list_of_lists_or_source_folder, str):
-            list_of_lists_or_source_folder = create_lists_from_splitted_dataset_folder(list_of_lists_or_source_folder,
+            list_of_lists_or_source_folder = create_lists_from_split_dataset_folder(list_of_lists_or_source_folder,
                                                                                        self.dataset_json['file_ending'])
         print(f'There are {len(list_of_lists_or_source_folder)} cases in the source folder')
         list_of_lists_or_source_folder = list_of_lists_or_source_folder[part_id::num_parts]
@@ -205,6 +227,8 @@ class nnUNetPredictor(object):
         This is nnU-Net's default function for making predictions. It works best for batch predictions
         (predicting many images at once).
         """
+        print(f"[INFO] predicting with num_processes_preprocessing: {num_processes_preprocessing}")
+        print(f"[INFO] predicting with num_processes_segmentation_export: {num_processes_segmentation_export}")
         if isinstance(output_folder_or_list_of_truncated_output_files, str):
             output_folder = output_folder_or_list_of_truncated_output_files
         elif isinstance(output_folder_or_list_of_truncated_output_files, list):
@@ -342,6 +366,7 @@ class nnUNetPredictor(object):
         """
         with multiprocessing.get_context("spawn").Pool(num_processes_segmentation_export) as export_pool:
             worker_list = [i for i in export_pool._pool]
+            print(f"[INFO] Let's start with N worker_list: {len(worker_list)}")
             r = []
             for preprocessed in data_iterator:
                 data = preprocessed['data']
@@ -349,6 +374,7 @@ class nnUNetPredictor(object):
                     delfile = data
                     data = torch.from_numpy(np.load(data))
                     os.remove(delfile)
+                print(f"[INFO] Sample is read from the data_iterator: {data.shape}")
 
                 ofile = preprocessed['ofile']
                 if ofile is not None:
@@ -368,18 +394,18 @@ class nnUNetPredictor(object):
                     sleep(0.1)
                     proceed = not check_workers_alive_and_busy(export_pool, worker_list, r, allowed_num_queued=2)
 
-                prediction = self.predict_logits_from_preprocessed_data(data).cpu()
+                prediction = self.predict_logits_from_preprocessed_data(data).cpu().detach().numpy()
 
                 if ofile is not None:
-                    # this needs to go into background processes
-                    # export_prediction_from_logits(prediction, properties, configuration_manager, plans_manager,
-                    #                               dataset_json, ofile, save_probabilities)
                     print('sending off prediction to background worker for resampling and export')
                     r.append(
                         export_pool.starmap_async(
                             export_prediction_from_logits,
                             ((prediction, properties, self.configuration_manager, self.plans_manager,
-                              self.dataset_json, ofile, save_probabilities),)
+                              self.dataset_json, ofile, save_probabilities,
+                              default_num_processes,
+                             self.target_type,
+                             self.label_manager),)
                         )
                     )
                 else:
@@ -436,7 +462,7 @@ class nnUNetPredictor(object):
         if output_file_truncated is not None:
             export_prediction_from_logits(predicted_logits, dct['data_properties'], self.configuration_manager,
                                           self.plans_manager, self.dataset_json, output_file_truncated,
-                                          save_or_return_probabilities)
+                                          save_or_return_probabilities, target_type=self.target_type)
         else:
             ret = convert_predicted_logits_to_segmentation_with_correct_shape(predicted_logits, self.plans_manager,
                                                                               self.configuration_manager,
@@ -542,47 +568,81 @@ class nnUNetPredictor(object):
                                                        slicers,
                                                        do_on_device: bool = True,
                                                        ):
+        predicted_logits = n_predictions = prediction = gaussian = workon = None
         results_device = self.device if do_on_device else torch.device('cpu')
-        empty_cache(self.device)
 
-        # move data to device
-        if self.verbose:
-            print(f'move image to device {results_device}')
-        data = data.to(results_device)
+        try:
+            empty_cache(self.device)
 
-        # preallocate arrays
-        if self.verbose:
-            print(f'preallocating results arrays on device {results_device}')
-        predicted_logits = torch.zeros((self.label_manager.num_segmentation_heads, *data.shape[1:]),
-                                       dtype=torch.half,
-                                       device=results_device)
-        n_predictions = torch.zeros(data.shape[1:], dtype=torch.half, device=results_device)
-        if self.use_gaussian:
-            gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
-                                        value_scaling_factor=10,
-                                        device=results_device)
+            # move data to device
+            if self.verbose:
+                print(f'move image to device {results_device}')
+            try:
+                data = data.to(results_device)
+            except torch.OutOfMemoryError:
+                raise torch.OutOfMemoryError("Even data didn't fit on the GPU :( "
+                                             "We may need more investigation in patch analysis!")
 
-        if self.verbose: print('running prediction')
-        if not self.allow_tqdm and self.verbose: print(f'{len(slicers)} steps')
-        for sl in tqdm(slicers, disable=not self.allow_tqdm):
-            workon = data[sl][None]
-            workon = workon.to(self.device, non_blocking=False)
+            # preallocate arrays
+            if self.verbose:
+                print(f'preallocating results arrays on device {results_device}')
+            try:
+                logits_cpu = False
+                predicted_logits = torch.zeros((self.label_manager.num_segmentation_heads, *data.shape[1:]),
+                                               dtype=torch.half,
+                                               device=results_device)
+            except torch.OutOfMemoryError:
+                logits_cpu = True
+                print("[INFO] Setting predicted_logits, n_predictions, and gaussian to CPU")
+                predicted_logits = torch.zeros((self.label_manager.num_segmentation_heads, *data.shape[1:]),
+                                               dtype=torch.half,
+                                               device=torch.device('cpu'))
+            n_predictions = torch.zeros(data.shape[1:], dtype=torch.half,
+                                        device=results_device if not logits_cpu else torch.device('cpu'))
 
-            prediction = self._internal_maybe_mirror_and_predict(workon)[0].to(results_device)
+            if self.use_gaussian:
+                gaussian = compute_gaussian(tuple(self.configuration_manager.patch_size), sigma_scale=1. / 8,
+                                            value_scaling_factor=10,
+                                            device=results_device if not logits_cpu else torch.device('cpu'))
+            else:
+                gaussian = 1
 
-            predicted_logits[sl] += (prediction * gaussian if self.use_gaussian else prediction)
-            n_predictions[sl[1:]] += (gaussian if self.use_gaussian else 1)
+            if not self.allow_tqdm and self.verbose:
+                print(f'running prediction: {len(slicers)} steps')
+            for sl in tqdm(slicers, disable=not self.allow_tqdm, desc=f"Inferencing on {len(slicers)} slices"):
+                # tic = time.time()
+                workon = data[sl][None] # add batch size of one
+                workon = workon.to(self.device)
 
-        predicted_logits /= n_predictions
-        # check for infs
-        if torch.any(torch.isinf(predicted_logits)):
-            raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
-                               'reduce value_scaling_factor in compute_gaussian or increase the dtype of '
-                               'predicted_logits to fp32')
+                prediction = self._internal_maybe_mirror_and_predict(workon)[0].to(
+                    results_device if not logits_cpu else torch.device('cpu'))
+
+                if self.use_gaussian:
+                    prediction *= gaussian
+                predicted_logits[sl] += prediction
+                n_predictions[sl[1:]] += gaussian
+                # print(f"[INFO] tile took: {time.time() - tic}")
+
+            predicted_logits /= n_predictions
+            # check for infs
+            try:
+                if torch.any(torch.isinf(predicted_logits)):
+                    raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
+                                       'reduce value_scaling_factor in compute_gaussian or increase the dtype of '
+                                       'predicted_logits to fp32')
+            except torch.OutOfMemoryError:
+                if torch.any(torch.isinf(predicted_logits.to("cpu"))):
+                    raise RuntimeError('Encountered inf in predicted array. Aborting... If this problem persists, '
+                                       'reduce value_scaling_factor in compute_gaussian or increase the dtype of '
+                                       'predicted_logits to fp32')
+        except Exception as e:
+            del predicted_logits, n_predictions, prediction, gaussian, workon
+            empty_cache(self.device)
+            empty_cache(results_device)
+            raise e
         return predicted_logits
 
-    def predict_sliding_window_return_logits(self, input_image: torch.Tensor) \
-            -> Union[np.ndarray, torch.Tensor]:
+    def predict_sliding_window_return_logits(self, input_image: torch.Tensor) -> Union[np.ndarray, torch.Tensor]:
         assert isinstance(input_image, torch.Tensor)
         self.network = self.network.to(self.device)
         self.network.eval()
@@ -615,7 +675,7 @@ class nnUNetPredictor(object):
                     try:
                         predicted_logits = self._internal_predict_sliding_window_return_logits(data, slicers,
                                                                                                self.perform_everything_on_device)
-                    except RuntimeError:
+                    except torch.OutOfMemoryError:
                         print(
                             'Prediction on device was unsuccessful, probably due to a lack of memory. Moving results arrays to CPU')
                         empty_cache(self.device)
