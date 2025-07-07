@@ -55,6 +55,7 @@ dependencies = [
     "deep_utils",
     "torchinfo",
     "numba",
+    "blosc2 (>=3.5.1,<4.0.0)",
 ]
 
 [project.urls]
@@ -94,9 +95,6 @@ dev = [
 [build-system]
 requires = ["setuptools>=67.8.0"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools]
-py-modules = []
 
 [tool.codespell]
 skip = '.git,*.pdf,*.svg'
