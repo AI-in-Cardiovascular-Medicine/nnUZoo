@@ -96,6 +96,9 @@ dev = [
 requires = ["setuptools>=67.8.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+py-modules = []
+
 [tool.codespell]
 skip = '.git,*.pdf,*.svg'
 
