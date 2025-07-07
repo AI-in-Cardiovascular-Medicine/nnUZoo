@@ -52,7 +52,6 @@ dependencies = [
     "batchgeneratorsv2>=0.2",
     "einops",
     "monai>=1.4.0",
-    "opencv-python",
     "deep_utils",
     "torchinfo",
     "numba",
