@@ -692,20 +692,22 @@ def get_from_plans(
     return model
 
 
+# num_segmentation_heads: int,
+# num_input_channels: int,
+# deep_supervision: bool = True,
+# use_pretrain: bool = True
 def get_u2net_from_plans(
-        plans_manager: PlansManager,
-        dataset_json: dict,
-        configuration_manager: ConfigurationManager,
+        spatial_dims: int,
+        num_segmentation_heads: int,
         num_input_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
 
-    model = U2NET(spatial_dims=len(configuration_manager.patch_size),
-                  in_ch=num_input_channels, out_ch=label_manager.num_segmentation_heads,
+    model = U2NET(spatial_dims=spatial_dims,
+                  in_ch=num_input_channels, out_ch=num_segmentation_heads,
                   deep_supervision=deep_supervision)
     model.apply(InitWeights_He(1e-2))
     model.apply(init_last_bn_before_add_to_0)
