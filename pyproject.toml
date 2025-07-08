@@ -92,7 +92,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=67.8.0"]
+requires = ["setuptools", "setuptools-scm"]
 build-backend = "setuptools.build_meta"
 
 [tool.codespell]
@@ -100,3 +100,4 @@ skip = '.git,*.pdf,*.svg'
 
 [tool.setuptools]
 packages = ["nnunetv2"]
+package-dir = ["nnunetv2"]
