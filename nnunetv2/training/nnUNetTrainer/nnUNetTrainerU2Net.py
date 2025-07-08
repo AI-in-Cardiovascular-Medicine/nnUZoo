@@ -1,16 +1,15 @@
 from typing import Union, List, Literal, Tuple
 
 import torch
-from nnunetv2.nets.u2net import get_u2net_from_plans
-from nnunetv2.nets.u2net import get_u2netp_from_plans
-from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchinfo import summary
+
+from nnunetv2.nets.u2net import get_u2net_from_plans
+from nnunetv2.nets.u2net import get_u2netp_from_plans
+from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager
 
 
 class nnUNetTrainerU2Net(nnUNetTrainer):

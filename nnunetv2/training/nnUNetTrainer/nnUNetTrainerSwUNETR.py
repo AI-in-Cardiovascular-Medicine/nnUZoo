@@ -1,15 +1,13 @@
 from typing import List, Union, Tuple, Literal
-from os.path import join
-from monai.networks.nets import SwinUNETR
+
 import torch
-from batchgenerators.utilities.file_and_folder_operations import join
-from nnunetv2.nets.swt import get_swin_transformer_unet
-from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
+from monai.networks.nets import SwinUNETR
 from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torchinfo import summary
+
+from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager
 
 
 class nnUNetTrainerSwUNETR(nnUNetTrainer):

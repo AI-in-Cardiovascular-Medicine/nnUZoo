@@ -1,4 +1,3 @@
-from os.path import split
 import inspect
 import multiprocessing
 import os
@@ -8,6 +7,7 @@ import sys
 import warnings
 from copy import deepcopy
 from datetime import datetime
+from os.path import split
 from time import time, sleep
 from typing import Union, Tuple, List, Literal
 
@@ -38,6 +38,14 @@ from batchgeneratorsv2.transforms.utils.pseudo2d import Convert3DTo2DTransform, 
 from batchgeneratorsv2.transforms.utils.random import RandomTransform
 from batchgeneratorsv2.transforms.utils.remove_label import RemoveLabelTansform
 from batchgeneratorsv2.transforms.utils.seg_to_regions import ConvertSegmentationToRegionsTransform
+from torch import distributed as dist
+from torch import nn
+from torch._dynamo import OptimizedModule
+from torch.cuda import device_count
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torchinfo import summary
+from tqdm import tqdm
+
 from nnunetv2.configuration import ANISO_THRESHOLD, default_num_processes
 from nnunetv2.evaluation.evaluate_predictions import compute_metrics_on_folder, compute_metrics_on_folder_reg
 from nnunetv2.inference.export_prediction import export_prediction_from_logits, resample_and_save
@@ -66,17 +74,11 @@ from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
 from nnunetv2.utilities.helpers import empty_cache, dummy_context
 from nnunetv2.utilities.label_handling.label_handling import convert_labelmap_to_one_hot, determine_num_input_channels
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager, ConfigurationManager
-from torch import nn
-from torch import distributed as dist
-from torch._dynamo import OptimizedModule
-from torch.cuda import device_count
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torchinfo import summary
-from tqdm import tqdm
 
 
 class nnUNetTrainer:
-    def __init__(self, plans: dict, configuration: str, fold: int | str, dataset_json: dict, unpack_dataset: bool = True,
+    def __init__(self, plans: dict, configuration: str, fold: int | str, dataset_json: dict,
+                 unpack_dataset: bool = True,
                  device: torch.device = torch.device('cuda'), num_epochs: int = 1000, initial_lr: float = 1e-2,
                  up_sample_type: Literal['convtranspose', 'trilinear', "nearest"] = 'convtranspose',
                  batch_size: int = None,
@@ -145,8 +147,10 @@ class nnUNetTrainer:
         ### Setting all the folder names. We need to make sure things don't crash in case we are just running
         # inference and some of the folders may not be defined!
         preprocessed_dataset_folder_base = kwargs.get("preprocessed_dataset_folder_base")
-        if preprocessed_dataset_folder_base  and self.plans_manager.dataset_name != split(preprocessed_dataset_folder_base)[-1]:
-            raise ValueError(f"DatasetName in plans_manager: {self.plans_manager.dataset_name} is different from the directory path: {split(preprocessed_dataset_folder_base)[-1]}")
+        if preprocessed_dataset_folder_base and self.plans_manager.dataset_name != \
+                split(preprocessed_dataset_folder_base)[-1]:
+            raise ValueError(
+                f"DatasetName in plans_manager: {self.plans_manager.dataset_name} is different from the directory path: {split(preprocessed_dataset_folder_base)[-1]}")
         self.preprocessed_dataset_folder_base = join(nnUNet_preprocessed, self.plans_manager.dataset_name) \
             if nnUNet_preprocessed is not None else None
         self.output_folder_base = join(nnUNet_results, self.plans_manager.dataset_name,
@@ -647,7 +651,8 @@ class nnUNetTrainer:
                 val_size, = fold_split
                 random_state = ""
             else:
-                raise ValueError(f"{fold_split} is not supported. Supported: get_one_fold, get_one_fold-0.4, get_one_fold-0.2-2342342, get_one_fold-imagesVl, get_one_fold-imagesVl-1256")
+                raise ValueError(
+                    f"{fold_split} is not supported. Supported: get_one_fold, get_one_fold-0.4, get_one_fold-0.2-2342342, get_one_fold-imagesVl, get_one_fold-imagesVl-1256")
             random_state = int(random_state) if random_state.isdigit() else 12345
             if not val_size.isdigit() and val_size:
                 case_identifiers = self.dataset_class.get_identifiers(self.preprocessed_dataset_folder)
@@ -655,13 +660,14 @@ class nnUNetTrainer:
                 val_path = join(nnUNet_raw, self.plans_manager.dataset_name, val_size)
                 if not os.path.exists(val_path):
                     raise ValueError(f"Val path: {val_path} does not exist!")
-                def replace_(string_data_:str):
+
+                def replace_(string_data_: str):
                     for i in range(10):
                         string_data_ = string_data_.replace(f"_000{i}.nii.gz", "")
-                    string_data_= string_data_.replace(".nii.gz", "")
+                    string_data_ = string_data_.replace(".nii.gz", "")
                     return string_data_
 
-                val_keys = [replace_(item)for item in os.listdir(val_path)]
+                val_keys = [replace_(item) for item in os.listdir(val_path)]
                 tr_keys = [item for item in case_identifiers if item not in val_keys]
                 save_json([{"train": tr_keys, "val": val_keys}], splits_file)
             elif val_size.isdigit() or val_size == "":
@@ -1498,11 +1504,11 @@ class nnUNetTrainer:
                                    also_print_to_console=True)
         elif self.local_rank == 0 and self.target_type == "translation":
             metrics = compute_metrics_on_folder_reg(join(self.preprocessed_dataset_folder_base, 'gt_segmentations'),
-                                                validation_output_folder,
-                                                join(validation_output_folder, 'summary.json'),
-                                                self.plans_manager.image_reader_writer_class(),
-                                                self.dataset_json["file_ending"],
-                                                chill=True)
+                                                    validation_output_folder,
+                                                    join(validation_output_folder, 'summary.json'),
+                                                    self.plans_manager.image_reader_writer_class(),
+                                                    self.dataset_json["file_ending"],
+                                                    chill=True)
             self.print_to_log_file("Validation complete", also_print_to_console=True)
             self.print_to_log_file("foreground_mean: ", (metrics['foreground_mean'],),
                                    also_print_to_console=True)
@@ -1548,7 +1554,8 @@ class nnUNetTrainer:
         for i_k, k in enumerate(dataset_val.identifiers):
             if i_k not in indices:
                 continue
-            shutil.copy(join(nnUNet_raw, self.plans_manager.dataset_name, "imagesTr", k + '_0000.nii.gz'), validation_images_output_folder)
+            shutil.copy(join(nnUNet_raw, self.plans_manager.dataset_name, "imagesTr", k + '_0000.nii.gz'),
+                        validation_images_output_folder)
             data, _, seg_prev, properties = dataset_val.load_case(k)
             self.print_to_log_file(f"performing qualitative validation on {k}, data: {data.shape}")
 
@@ -1689,6 +1696,7 @@ class nnUNetTrainer_05Percent(nnUNetTrainer):
         n_v = len(val_keys)
         return tr_keys[:round(n_t * percent)], val_keys[:round(n_v * percent)]
 
+
 class nnUNetTrainer_10Percent(nnUNetTrainer):
     def do_split(self):
         tr_keys, val_keys = super().do_split()
@@ -1697,6 +1705,7 @@ class nnUNetTrainer_10Percent(nnUNetTrainer):
         n_v = len(val_keys)
         return tr_keys[:round(n_t * percent)], val_keys[:round(n_v * percent)]
 
+
 class nnUNetTrainer_25Percent(nnUNetTrainer):
     def do_split(self):
         tr_keys, val_keys = super().do_split()
@@ -1704,6 +1713,7 @@ class nnUNetTrainer_25Percent(nnUNetTrainer):
         n_t = len(tr_keys)
         n_v = len(val_keys)
         return tr_keys[:round(n_t * percent)], val_keys[:round(n_v * percent)]
+
 
 class nnUNetTrainer_50Percent(nnUNetTrainer):
     def do_split(self):

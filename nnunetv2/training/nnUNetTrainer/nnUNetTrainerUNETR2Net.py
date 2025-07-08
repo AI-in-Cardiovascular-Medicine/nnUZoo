@@ -1,5 +1,8 @@
 from batchgenerators.utilities.file_and_folder_operations import join
-from nnunetv2.nets.unetr2net import get_unetr2net_from_plans
+try:
+    from nnunetv2.nets.unetr2net import get_unetr2net_from_plans
+except:
+    pass
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 from torch import nn

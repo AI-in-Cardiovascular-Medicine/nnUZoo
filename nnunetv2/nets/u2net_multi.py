@@ -1,7 +1,4 @@
 from monai.utils import UpsampleMode, InterpolateMode
-from timm.layers import DropPath
-
-DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
 import torch
 import torch.nn as nn
@@ -509,10 +506,10 @@ class U2NETP(nn.Module):
         # decoder
         output_features = [128 if self.mae else 64 for _ in range(5)]
         self.stage5d = RSU4F(spatial_dims, 128, 16, output_features[0])
-        self.stage4d = RSU4(spatial_dims, 128, 16,  output_features[1])
-        self.stage3d = RSU5(spatial_dims, 128, 16,  output_features[2])
-        self.stage2d = RSU6(spatial_dims, 128, 16,  output_features[3])
-        self.stage1d = RSU7(spatial_dims, 128, 16,  output_features[4])
+        self.stage4d = RSU4(spatial_dims, 128, 16, output_features[1])
+        self.stage3d = RSU5(spatial_dims, 128, 16, output_features[2])
+        self.stage2d = RSU6(spatial_dims, 128, 16, output_features[3])
+        self.stage1d = RSU7(spatial_dims, 128, 16, output_features[4])
 
         self.side1 = Convolution(spatial_dims, output_features[0], out_ch, kernel_size=3, padding=1)
         self.side2 = Convolution(spatial_dims, output_features[1], out_ch, kernel_size=3, padding=1)
@@ -534,7 +531,7 @@ class U2NETP(nn.Module):
         # if len(pred.shape) == 4:
         #     n, c, _, _ = pred.shape
         #     pred = pred.reshape(n, -1, c)
-            # pred = torch.einsum('ncl->nlc', pred) #.reshape(pred.shape[0], -1)
+        # pred = torch.einsum('ncl->nlc', pred) #.reshape(pred.shape[0], -1)
         pred = patchify(pred, self.patchify_size, self.in_ch)
         target = patchify(imgs, self.patchify_size, self.in_ch)
         # print("mask:", mask.shape,"pred:", pred.shape,"target:", target.shape)

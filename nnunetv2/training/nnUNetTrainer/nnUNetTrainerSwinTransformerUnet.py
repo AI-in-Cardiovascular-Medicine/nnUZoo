@@ -2,7 +2,10 @@ from os.path import join
 
 import torch
 from batchgenerators.utilities.file_and_folder_operations import join
-from nnunetv2.nets.swt import get_swin_transformer_unet
+try:
+    from nnunetv2.nets.swt import get_swin_transformer_unet
+except:
+    pass
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 from torch import nn
