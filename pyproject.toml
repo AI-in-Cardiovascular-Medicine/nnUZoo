@@ -1,6 +1,6 @@
 [project]
 name = "nnunetv2"
-version = "1.0.0"
+version = "1.0.1"
 requires-python = ">=3.10"
 description = "nnUZoo is based on famus nnU-Net and it's a framework for out-of-the box image segmentation, translation, regression, etc with various models ranging from CNN, transformers, and Mamba."
 readme = "README.md"
@@ -33,7 +33,6 @@ dependencies = [
     "acvl-utils>=0.2,<0.3", # 0.3 may bring breaking changes. Careful!
     "dynamic-network-architectures>=0.3.1,<0.4", # 0.3.1 and lower are supported, 0.4 may have breaking changes. Let's be careful here
     "tqdm",
-    "dicom2nifti",
     "scipy",
     "batchgenerators>=0.25",
     "numpy",
