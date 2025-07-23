@@ -53,10 +53,9 @@ The codes with CUDA should be compatible with Windows, Mac, and other Linux dist
   to [mamba-installation-documents](https://github.com/state-spaces/mamba?tab=readme-ov-file#installation)
 
 ## Library Installation
-
 ```commandline
-pip install -r requirements.txt
-pip install ./nnUNet
+cd nnUZoo
+pip install .
 ```
 
 ## Train
