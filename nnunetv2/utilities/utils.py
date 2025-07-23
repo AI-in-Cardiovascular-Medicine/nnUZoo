@@ -53,7 +53,10 @@ def create_lists_from_split_dataset_folder(folder: str, file_ending: str, identi
     if files is None:
         # files = subfiles(folder, suffix=file_ending, join=False, sort=True)
         files = DirUtils.list_dir_full_path(folder, ends_with=file_ending)
-    list_of_lists = list(files.values())
+    if isinstance(files, list):
+        list_of_lists = files
+    else:
+        list_of_lists = list(files.values())
     # list_of_lists = []
     # for f in tqdm(identifiers, desc="create_list_from_split_dataset_folder"):
     #     p = re.compile(re.escape(f) + r"_\d\d\d\d" + re.escape(file_ending))
