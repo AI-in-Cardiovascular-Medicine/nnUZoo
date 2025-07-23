@@ -23,7 +23,7 @@ if __name__ == '__main__':
     output_path = join(nnunet_raw, args.dataset_name, f"imagesTs_{args.model_name}_Pred")
 
     res = os.system(
-        f"python code_inference.py --device cuda:{args.device} --model_path  {model_path} --input {input_path} --output {output_path} --ext {'.png' if args.dataset_name == 'Dataset032_NeurlPSCell' else '.gz'}")
+        f"python inference.py --device cuda:{args.device} --model_path  {model_path} --input {input_path} --output {output_path} --ext {'.png' if args.dataset_name == 'Dataset032_NeurlPSCell' else '.gz'}")
     if res != 0:
         print(
             f"[Error] Couldn't do {args.model_name} on {args.dataset_name} with command: \n python code_inference.py --device cuda:0 --model_path  {model_path} --input {input_path} --output {output_path} --ext {'.png' if args.dataset_name == 'Dataset032_NeurlPSCell' else '.gz'}")
