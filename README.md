@@ -131,6 +131,10 @@ Here is the outcome of various models on all datasets:
 
 This project is covered under the [Apache License 2.0](LICENSE) License.
 
+## References
+
+The main parts of this project is derived from the famous [nnUNet](https://github.com/MIC-DKFZ/nnUNet) project. 
+
 ## Citation
 
 Please kindly cite the following paper if you use this repository.
