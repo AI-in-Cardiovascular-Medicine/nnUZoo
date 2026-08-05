@@ -13,52 +13,67 @@
 #    limitations under the License.
 
 import os
-join = os.path.join
+
 """
-Please make sure your data is organized as follows:
-
-data/
-├── nnUNet_raw/
-│   ├── Dataset701_AbdomenCT/
-│   │   ├── imagesTr
-│   │   │   ├── FLARE22_Tr_0001_0000.nii.gz
-│   │   │   ├── FLARE22_Tr_0002_0000.nii.gz
-│   │   │   ├── ...
-│   │   ├── labelsTr
-│   │   │   ├── FLARE22_Tr_0001.nii.gz
-│   │   │   ├── FLARE22_Tr_0002.nii.gz
-│   │   │   ├── ...
-│   │   ├── dataset.json
-│   ├── Dataset702_AbdomenMR/
-│   │   ├── imagesTr
-│   │   │   ├── amos_0507_0000.nii.gz
-│   │   │   ├── amos_0508_0000.nii.gz
-│   │   │   ├── ...
-│   │   ├── labelsTr
-│   │   │   ├── amos_0507.nii.gz
-│   │   │   ├── amos_0508.nii.gz
-│   │   │   ├── ...
-│   │   ├── dataset.json
-│   ├── ...
+PLEASE READ documentation/setting_up_paths.md FOR INFORMATION TO HOW TO SET THIS UP
 """
-# base = join(os.sep.join(__file__.split(os.sep)[:-3]), 'data')
-# or you can set your own path, e.g., base = '/home/user_name/Documents/U-Mamba/data'
-nnUNet_raw =  os.environ.get('nnUNet_raw')
-nnUNet_preprocessed = os.environ.get('nnUNet_preprocessed')
-nnUNet_results = os.environ.get('nnUNet_results')
 
-if nnUNet_raw is None:
-    print("nnUNet_raw is not defined and nnU-Net can only be used on data for which preprocessed files "
-          "are already present on your system. nnU-Net cannot be used for experiment planning and preprocessing like "
-          "this. If this is not intended, please read documentation/setting_up_paths.md for information on how to set "
-          "this up properly.")
 
-if nnUNet_preprocessed is None:
-    print("nnUNet_preprocessed is not defined and nnU-Net can not be used for preprocessing "
-          "or training. If this is not intended, please read documentation/setting_up_paths.md for information on how "
-          "to set this up.")
+class _EnvPath(os.PathLike):
+    def __init__(self, env_var_name: str, missing_message: str):
+        self.env_var_name = env_var_name
+        self.missing_message = missing_message
 
-if nnUNet_results is None:
-    print("nnUNet_results is not defined and nnU-Net cannot be used for training or "
-          "inference. If this is not intended behavior, please read documentation/setting_up_paths.md for information "
-          "on how to set this up.")
+    def get(self):
+        return os.environ.get(self.env_var_name)
+
+    def is_set(self) -> bool:
+        return self.get() is not None
+
+    def require(self) -> str:
+        value = self.get()
+        if value is None:
+            raise RuntimeError(
+                f"{self.env_var_name} is not defined. {self.missing_message} "
+                f"Please read documentation/setting_up_paths.md for information on how to set this up."
+            )
+        return value
+
+    def __fspath__(self) -> str:
+        return self.require()
+
+    def __str__(self) -> str:
+        return self.require()
+
+    def __repr__(self) -> str:
+        value = self.get()
+        return repr(value) if value is not None else f"<unset {self.env_var_name}>"
+
+    def __bool__(self) -> bool:
+        return self.is_set()
+
+    def __eq__(self, other) -> bool:
+        if other is None:
+            return self.get() is None
+        if isinstance(other, _EnvPath):
+            return self.get() == other.get()
+        return self.get() == other
+
+
+nnUNet_raw = _EnvPath(
+    'nnUNet_raw',
+    "nnU-Net can only be used on data for which preprocessed files are already present on your system. "
+    "nnU-Net cannot be used for experiment planning and preprocessing like this. If this is not intended, "
+)
+nnUNet_preprocessed = _EnvPath(
+    'nnUNet_preprocessed',
+    "nnU-Net cannot be used for preprocessing or training. If this is not intended, "
+)
+nnUNet_results = _EnvPath(
+    'nnUNet_results',
+    "nnU-Net cannot be used for training or inference. If this is not intended behavior, "
+)
+nnUNet_extTrainer = _EnvPath(
+    'nnUNet_extTrainer',
+    "nnU-Net cannot locate custom trainer classes from external directories. If this is not intended, "
+)

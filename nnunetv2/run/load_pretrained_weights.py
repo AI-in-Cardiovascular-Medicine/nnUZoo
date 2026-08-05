@@ -4,7 +4,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import re
 
 
-def load_pretrained_weights(network, fname, verbose=False):
+def load_pretrained_weights(network, fname, verbose=False, only_encoder:bool=False, 
+                            strict_in_missing_weights:bool=True, logger_func = print):
+    
     """
     Transfers all weights between matching keys in state_dicts. matching is done by name and we only transfer if the
     shape is also the same. Segmentation layers (the 1x1(x1) layers that produce the segmentation maps)
@@ -16,21 +18,22 @@ def load_pretrained_weights(network, fname, verbose=False):
     nnUNetTrainer.save_checkpoint takes care of that!
 
     """
+    
     if "vmamba" in fname:
         model = network
         num_input_channels = next(model.parameters()).shape[1]
-        print(f"Loading weights from: {fname} with num_input_channels: {num_input_channels}")
+        logger_func(f"Loading weights from: {fname} with num_input_channels: {num_input_channels}")
         skip_params = ["norm.weight", "norm.bias", "head.weight", "head.bias"]
 
         ckpt = torch.load(fname, map_location='cpu')
         model_dict = model.state_dict()
         for k, v in ckpt['model'].items():
             if k in skip_params:
-                print(f"Skipping weights: {k}")
+                logger_func(f"Skipping weights: {k}")
                 continue
             kr = f"vssm_encoder.{k}"
             if "patch_embed" in k and ckpt['model']["patch_embed.proj.weight"].shape[1] != num_input_channels:
-                print(f"Passing weights: {k}")
+                logger_func(f"Passing weights: {k}")
                 continue
             if "downsample" in kr:
                 i_ds = int(re.findall(r"layers\.(\d+)\.downsample", kr)[0])
@@ -40,17 +43,23 @@ def load_pretrained_weights(network, fname, verbose=False):
                 assert v.shape == model_dict[kr].shape, f"Shape mismatch: {v.shape} vs {model_dict[kr].shape}"
                 model_dict[kr] = v
             else:
-                print(f"Passing weights: {k}")
+                logger_func(f"Passing weights: {k}")
 
         model.load_state_dict(model_dict)
     else:
-        saved_model = torch.load(fname)
+        saved_model = torch.load(fname, weights_only=False)
         pretrained_dict = saved_model['network_weights']
 
         skip_strings_in_pretrained = [
             '.seg_layers.',
-        ]
 
+        ]
+        if only_encoder:
+            skip_strings_in_pretrained.append("decoder")
+            skip_strings_in_pretrained.append("decode")
+            skip_strings_in_pretrained.append("seg_layers.")
+            skip_strings_in_pretrained.append("head")
+        logger_func(f"[INFO] Ignoring the keys: {skip_strings_in_pretrained}!")
         if isinstance(network, DDP):
             mod = network.module
         else:
@@ -62,13 +71,15 @@ def load_pretrained_weights(network, fname, verbose=False):
         # verify that all but the segmentation layers have the same shape
         for key, _ in model_dict.items():
             if all([i not in key for i in skip_strings_in_pretrained]):
-                assert key in pretrained_dict, \
-                    f"Key {key} is missing in the pretrained model weights. The pretrained weights do not seem to be " \
-                    f"compatible with your network."
-                assert model_dict[key].shape == pretrained_dict[key].shape, \
-                    f"The shape of the parameters of key {key} is not the same. Pretrained model: " \
-                    f"{pretrained_dict[key].shape}; your network: {model_dict[key]}. The pretrained model " \
-                    f"does not seem to be compatible with your network."
+                if strict_in_missing_weights:
+                    assert key in pretrained_dict, \
+                        f"Key {key} is missing in the pretrained model weights. The pretrained weights do not seem to be " \
+                        f"compatible with your network."
+                
+                    assert model_dict[key].shape == pretrained_dict[key].shape, \
+                        f"The shape of the parameters of key {key} is not the same. Pretrained model: " \
+                        f"{pretrained_dict[key].shape}; your network: {model_dict[key].shape}. The pretrained model " \
+                        f"does not seem to be compatible with your network."
 
         # fun fact: in principle this allows loading from parameters that do not cover the entire network. For example pretrained
         # encoders. Not supported by this function though (see assertions above)
@@ -84,12 +95,12 @@ def load_pretrained_weights(network, fname, verbose=False):
 
         model_dict.update(pretrained_dict)
 
-        print("################### Loading pretrained weights from file ", fname, '###################')
+        logger_func("################### Loading pretrained weights from file ", fname, '###################')
         if verbose:
-            print("Below is the list of overlapping blocks in pretrained model and nnUNet architecture:")
+            logger_func("Below is the list of overlapping blocks in pretrained model and nnUNet architecture:")
             for key, value in pretrained_dict.items():
-                print(key, 'shape', value.shape)
-            print("################### Done ###################")
+                logger_func(key, 'shape', value.shape)
+            logger_func(f"################### Loading pretrained weights from file: {fname} is Done ###################")
         mod.load_state_dict(model_dict)
 
 
