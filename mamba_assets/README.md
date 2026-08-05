@@ -1,4 +1,4 @@
-# Mamba environment (SwinUMamba)
+# Mamba environment
 
 SwinUMamba is the one architecture that cannot be trained in the main
 environment. This folder holds its environment definition; 
