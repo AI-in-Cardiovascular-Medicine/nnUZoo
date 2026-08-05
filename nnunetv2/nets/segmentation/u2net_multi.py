@@ -1,14 +1,12 @@
 from monai.utils import UpsampleMode, InterpolateMode
-
 import torch
 import torch.nn as nn
 from monai.networks.blocks.upsample import UpSample
 
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from nnunetv2.utilities.network_initialization import InitWeights_He
 from monai.networks.blocks.convolutions import Convolution
-from nnunetv2.nets.mask_funcs import gen_random_mask, upsample_mask, patchify, unpatchify, unpatchify_mask
+from nnunetv2.nets.core.mask_funcs import gen_random_mask, upsample_mask, patchify, unpatchify, unpatchify_mask
 
 
 class MaxPool(nn.Module):
@@ -506,10 +504,10 @@ class U2NETP(nn.Module):
         # decoder
         output_features = [128 if self.mae else 64 for _ in range(5)]
         self.stage5d = RSU4F(spatial_dims, 128, 16, output_features[0])
-        self.stage4d = RSU4(spatial_dims, 128, 16, output_features[1])
-        self.stage3d = RSU5(spatial_dims, 128, 16, output_features[2])
-        self.stage2d = RSU6(spatial_dims, 128, 16, output_features[3])
-        self.stage1d = RSU7(spatial_dims, 128, 16, output_features[4])
+        self.stage4d = RSU4(spatial_dims, 128, 16,  output_features[1])
+        self.stage3d = RSU5(spatial_dims, 128, 16,  output_features[2])
+        self.stage2d = RSU6(spatial_dims, 128, 16,  output_features[3])
+        self.stage1d = RSU7(spatial_dims, 128, 16,  output_features[4])
 
         self.side1 = Convolution(spatial_dims, output_features[0], out_ch, kernel_size=3, padding=1)
         self.side2 = Convolution(spatial_dims, output_features[1], out_ch, kernel_size=3, padding=1)
@@ -531,7 +529,7 @@ class U2NETP(nn.Module):
         # if len(pred.shape) == 4:
         #     n, c, _, _ = pred.shape
         #     pred = pred.reshape(n, -1, c)
-        # pred = torch.einsum('ncl->nlc', pred) #.reshape(pred.shape[0], -1)
+            # pred = torch.einsum('ncl->nlc', pred) #.reshape(pred.shape[0], -1)
         pred = patchify(pred, self.patchify_size, self.in_ch)
         target = patchify(imgs, self.patchify_size, self.in_ch)
         # print("mask:", mask.shape,"pred:", pred.shape,"target:", target.shape)
@@ -645,70 +643,27 @@ class U2NETP(nn.Module):
                 param.requires_grad = True
 
 
-def get_u2netp_from_plans(
-        plans_manager: PlansManager,
-        dataset_json: dict,
-        configuration_manager: ConfigurationManager,
-        num_input_channels: int,
-        deep_supervision: bool = True,
-        use_pretrain: bool = True
-):
-    # dim = len(configuration_manager.conv_kernel_sizes[0])
-    # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
-
-    model = U2NETP(spatial_dims=len(configuration_manager.patch_size),
-                   in_ch=num_input_channels, out_ch=label_manager.num_segmentation_heads,
-                   deep_supervision=deep_supervision)
-    model.apply(InitWeights_He(1e-2))
-    model.apply(init_last_bn_before_add_to_0)
-
-    # if use_pretrain:
-    #     model = load_pretrained_ckpt(model, num_input_channels=num_input_channels)
-
-    return model
-
-
-def get_from_plans(
-        spatial_dims,
-        in_ch: int,
-        out_ch,
-        deep_supervision: bool = True,
-        use_pretrain: bool = True,
-        mae: bool = True,
-        mask_ratio: bool = 0,
-):
-    model = U2NETP(spatial_dims=spatial_dims,
-                   in_ch=in_ch, out_ch=out_ch,
-                   deep_supervision=deep_supervision,
-                   mae=mae,
-                   mask_ratio=mask_ratio)
-    model.apply(InitWeights_He(1e-2))
-    model.apply(init_last_bn_before_add_to_0)
-
-    # if use_pretrain:
-    #     model = load_pretrained_ckpt(model, num_input_channels=num_input_channels)
-
-    return model
-
-
-# num_segmentation_heads: int,
-# num_input_channels: int,
-# deep_supervision: bool = True,
-# use_pretrain: bool = True
 def get_u2net_from_plans(
+        num_output_channels,
+        num_input_channels,
         spatial_dims: int,
-        num_segmentation_heads: int,
-        num_input_channels: int,
         deep_supervision: bool = True,
-        use_pretrain: bool = True
+        small: bool = True
 ):
+
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
 
-    model = U2NET(spatial_dims=spatial_dims,
-                  in_ch=num_input_channels, out_ch=num_segmentation_heads,
-                  deep_supervision=deep_supervision)
+    if small:
+        model = U2NETP(spatial_dims=spatial_dims,
+                   in_ch=num_input_channels, out_ch=num_output_channels,
+                   deep_supervision=deep_supervision)
+    else:
+        model = U2NET(
+            spatial_dims=spatial_dims,
+            in_ch=num_input_channels, out_ch=num_output_channels,
+            deep_supervision=deep_supervision)
+
     model.apply(InitWeights_He(1e-2))
     model.apply(init_last_bn_before_add_to_0)
 

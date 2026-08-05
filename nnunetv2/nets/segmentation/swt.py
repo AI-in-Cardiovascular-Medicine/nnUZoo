@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as func
 from einops import rearrange
 from monai.networks.blocks import Convolution
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 from torch.nn import functional as F
 
 
@@ -503,10 +502,9 @@ class BasicBlockUp(nn.Module):
 
 
 def get_swin_transformer_unet(
-        num_segmentation_heads:int ,
         num_input_channels: int,
-        deep_supervision: bool = True,
-        use_pretrain: bool = True
+        num_output_channels:int,
+
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
@@ -515,7 +513,7 @@ def get_swin_transformer_unet(
         # img_size=configuration_manager.patch_size,
         patch_size=4,
         in_ch=num_input_channels,
-        out_ch=num_segmentation_heads,
+        out_ch=num_output_channels,
         # decoder_embed_dim=768,
         depths=(2, 2, 9, 2), embed_dim=96, num_heads=(3, 6, 12, 24),
         window_size=7, qkv_bias=True, mlp_ratio=4,

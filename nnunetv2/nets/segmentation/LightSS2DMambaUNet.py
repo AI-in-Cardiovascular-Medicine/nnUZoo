@@ -1,4 +1,4 @@
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from torchinfo import summary
 import torch
 import torch.nn as nn
@@ -9,7 +9,7 @@ from monai.networks.layers.factories import Dropout
 from monai.networks.layers.utils import get_act_layer, get_norm_layer
 from monai.utils import UpsampleMode
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
-from einops import rearrange, repeat
+from einops import repeat
 import torch.nn.functional as F
 
 from nnunetv2.utilities.network_initialization import InitWeights_He

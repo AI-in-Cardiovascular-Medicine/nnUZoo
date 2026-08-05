@@ -7,7 +7,7 @@ from typing import Union, Tuple
 import torch.nn.functional as F
 
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from einops import rearrange
 import torch
 import torch.nn as nn
@@ -1311,26 +1311,25 @@ class LM2NetP(nn.Module):
 
 def get_lm2net_from_plans(
         plans_manager: PlansManager,
-        dataset_json: dict,
         configuration_manager: ConfigurationManager,
         num_input_channels: int,
+        num_output_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True,
         small: bool = False
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
     if not small:
         model = LM2Net(in_ch=num_input_channels,
-                       out_ch=label_manager.num_segmentation_heads,
+                       out_ch=num_output_channels,
                        deep_supervision=deep_supervision,
                        spatial_dims=len(configuration_manager.patch_size),
                        input_patch_size=configuration_manager.patch_size,
                        )
     else:
         model = LM2NetP(in_ch=num_input_channels,
-                        out_ch=label_manager.num_segmentation_heads,
+                        out_ch=num_output_channels,
                         deep_supervision=deep_supervision,
                         spatial_dims=len(configuration_manager.patch_size),
                         input_patch_size=configuration_manager.patch_size,

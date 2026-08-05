@@ -8,14 +8,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from einops import repeat
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+from monai.networks.blocks import Convolution
 from timm.layers import DropPath, trunc_normal_
 
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
 from monai.networks.blocks.dynunet_block import UnetOutBlock
 from monai.networks.blocks.unetr_block import UnetrBasicBlock, UnetrUpBlock
+from nnunetv2.nets.segmentation.ssnd2net import VSSMEncoder as VSSMEncoder3D
 
 
 class PatchEmbed2D(nn.Module):
@@ -106,6 +107,8 @@ class SS2D(nn.Module):
             bias=False,
             device=None,
             dtype=None,
+            spatial_dims=2,
+            dilation=1,
             **kwargs,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -164,6 +167,29 @@ class SS2D(nn.Module):
         self.out_norm = nn.LayerNorm(self.d_inner)
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
         self.dropout = nn.Dropout(dropout) if dropout > 0. else None
+
+        # self.dt_projs = (
+        #     self.dt_init(self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor,
+        #                  **factory_kwargs),
+        #     self.dt_init(self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor,
+        #                  **factory_kwargs),
+        #     self.dt_init(self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor,
+        #                  **factory_kwargs),
+        #     self.dt_init(self.dt_rank, self.d_inner, dt_scale, dt_init, dt_min, dt_max, dt_init_floor,
+        #                  **factory_kwargs),
+        # )
+        # self.dt_projs_weight = nn.Parameter(torch.stack([t.weight for t in self.dt_projs], dim=0))  # (K=4, inner, rank)
+        # self.dt_projs_bias = nn.Parameter(torch.stack([t.bias for t in self.dt_projs], dim=0))  # (K=4, inner)
+        # del self.dt_projs
+
+        # self.A_logs = self.A_log_init(self.d_state, self.d_inner, copies=4, merge=True)  # (K=4, D, N)
+        # self.Ds = self.D_init(self.d_inner, copies=4, merge=True)  # (K=4, D, N)
+
+        # self.selective_scan = selective_scan_fn
+
+        # self.out_norm = nn.LayerNorm(self.d_inner)
+        # self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
+        # self.dropout = nn.Dropout(dropout) if dropout > 0. else None
 
     @staticmethod
     def dt_init(dt_rank, d_inner, dt_scale=1.0, dt_init="random", dt_min=0.001, dt_max=0.1, dt_init_floor=1e-4,
@@ -369,12 +395,14 @@ class VSSMEncoder(nn.Module):
                  dims=[96, 192, 384, 768], d_state=16, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.2,
                  norm_layer=nn.LayerNorm, patch_norm=True,
                  use_checkpoint=False, **kwargs):
+        # [48, 96, 192, 384, 768]
         super().__init__()
         self.num_layers = len(depths)
         if isinstance(dims, int):
             dims = [int(dims * 2 ** i_layer) for i_layer in range(self.num_layers)]
+
         self.embed_dim = dims[0]
-        self.num_features = dims[-1]
+        # self.num_features = dims[-1]
         self.dims = dims
 
         self.patch_embed = PatchEmbed2D(patch_size=patch_size, in_chans=in_chans, embed_dim=self.embed_dim,
@@ -476,12 +504,35 @@ class SwinUMamba(nn.Module):
         self.feat_size = feat_size
         self.layer_scale_init_value = layer_scale_init_value
 
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_chans, feat_size[0], kernel_size=7, stride=2, padding=3),
-            nn.InstanceNorm2d(feat_size[0], eps=1e-5, affine=True),
-        )
         self.spatial_dims = spatial_dims
-        self.vssm_encoder = VSSMEncoder(patch_size=2, in_chans=feat_size[0])
+        if spatial_dims == 2:
+            self.stem = nn.Sequential(
+                nn.Conv2d(in_chans, feat_size[0], kernel_size=7, stride=2, padding=3),
+                nn.InstanceNorm2d(feat_size[0], eps=1e-5, affine=True),
+            )
+
+            self.vssm_encoder = VSSMEncoder(patch_size=2, in_chans=feat_size[0], dims=feat_size[1:], )
+        elif spatial_dims == 3:
+            self.stem = nn.Sequential(
+                Convolution(spatial_dims=3,
+                            in_channels=in_chans,
+                            out_channels=feat_size[0],
+                            kernel_size=7,
+                            strides=2,
+                            conv_only=True,
+                            padding=3),
+                # nn.Conv2d(in_chans, feat_size[0], kernel_size=7, stride=2, padding=3),
+                nn.InstanceNorm3d(feat_size[0], eps=1e-5, affine=True),
+            )
+            scales = [(2, 2, 2), (2, 2, 2), (2, 2, 2)]
+            self.vssm_encoder = VSSMEncoder3D(
+                spatial_dims=3,
+                factorization_type="cross-scan",
+                patch_size=2,
+                in_chans=feat_size[0],
+                dims=feat_size[1:],
+                scales=scales
+            )
         self.encoder1 = UnetrBasicBlock(
             spatial_dims=spatial_dims,
             in_channels=self.in_chans,
@@ -597,7 +648,10 @@ class SwinUMamba(nn.Module):
 
     def forward(self, x_in):
         x1 = self.stem(x_in)
+        # print(f"{self.__class__.__name__} -> x1: {x1.shape}")
         vss_outs = self.vssm_encoder(x1)
+        vss_outs[0] = vss_outs[0] or x1
+        # print(f"{self.__class__.__name__} -> vss_outs: {[item.shape for item in vss_outs]}")
         enc1 = self.encoder1(x_in)
         enc2 = self.encoder2(vss_outs[0])
         enc3 = self.encoder3(vss_outs[1])
@@ -666,15 +720,20 @@ def load_pretrained_ckpt(
 
 
 def get_swin_umamba_from_plans(
-        num_segmentation_heads: int,
         num_input_channels: int,
+        num_output_channels:int,
         deep_supervision: bool = True,
-        use_pretrain: bool = True
+        use_pretrain: bool = True,
+        spatial_dims: int = 2,
+        feat_size=[48, 96, 192, 384, 768]
 ):
     model = SwinUMamba(
         in_chans=num_input_channels,
-        out_chans=num_segmentation_heads,
+        out_chans=num_output_channels,
         deep_supervision=deep_supervision,
+        spatial_dims=spatial_dims,
+        feat_size=feat_size,
+        hidden_size=feat_size[-1]
     )
 
     if use_pretrain:
@@ -684,34 +743,55 @@ def get_swin_umamba_from_plans(
 
 
 if __name__ == '__main__':
+    import torch
+    from nnunetv2.nets.segmentation.SwinUMamba import get_swin_umamba_from_plans
+
     in_channels = 1
     bs = 2
-    patch_size = [256, 256]
-    out_channels = 5
-    model = LightSS2DMambaUNet(spatial_dims=len(patch_size), init_filters=32, in_channels=in_channels,
-                               out_channels=out_channels)
-    summary(model, input_size=[1, in_channels, *patch_size])
-    inputs = torch.rand((bs, in_channels, *patch_size)).to("cuda:0")
+    out_channels = 14
+    patch_size = [128, 256, 224]
+    model = get_swin_umamba_from_plans(out_channels,
+                                       in_channels,
+                                       spatial_dims=len(patch_size),
+                                       use_pretrain=False,
+                                       feat_size=[24, 48, 96, 192, 384],
+                                       ).to(
+        "cuda:1")
+    inputs = torch.rand((bs, in_channels, *patch_size)).to("cuda:1")
     output = model(inputs)
-    print(output.shape)
+    for o in output:
+        print(o.shape)
+    # summary(model, input_size=[1, in_channels, *patch_size])
 
-    import torch
-    # import torchvision.models as models
-    from torch.profiler import profile, record_function, ProfilerActivity
-
-    device = "cuda"
-    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU]
-    sort_by_keyword = device + "_time_total"
-    with profile(activities=activities, record_shapes=True) as prof:
-        with record_function("model_inference"):
-            model(inputs)
-    print(prof.key_averages().table(sort_by=sort_by_keyword, row_limit=100))
-    import time
-
-    model(inputs)
-    c = 0
-    for _ in range(50):
-        tic = time.time()
-        model(inputs)
-        c += (time.time() - tic)
-    print("time: ", c)
+# if __name__ == '__main__':
+#     in_channels = 1
+#     bs = 2
+#     patch_size = [256, 256]
+#     out_channels = 5
+#     model = LightSS2DMambaUNet(spatial_dims=len(patch_size), init_filters=32, in_channels=in_channels,
+#                                out_channels=out_channels)
+#     summary(model, input_size=[1, in_channels, *patch_size])
+#     inputs = torch.rand((bs, in_channels, *patch_size)).to("cuda:0")
+#     output = model(inputs)
+#     print(output.shape)
+#
+#     import torch
+#     # import torchvision.models as models
+#     from torch.profiler import profile, record_function, ProfilerActivity
+#
+#     device = "cuda"
+#     activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA, ProfilerActivity.XPU]
+#     sort_by_keyword = device + "_time_total"
+#     with profile(activities=activities, record_shapes=True) as prof:
+#         with record_function("model_inference"):
+#             model(inputs)
+#     print(prof.key_averages().table(sort_by=sort_by_keyword, row_limit=100))
+#     import time
+#
+#     model(inputs)
+#     c = 0
+#     for _ in range(50):
+#         tic = time.time()
+#         model(inputs)
+#         c += (time.time() - tic)
+#     print("time: ", c)

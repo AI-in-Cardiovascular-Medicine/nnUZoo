@@ -4,7 +4,6 @@ from timm.layers import DropPath
 
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
-from monai.networks.nets import swin_unetr
 import math
 from functools import partial
 from typing import Union, List, Tuple, Callable
@@ -20,7 +19,7 @@ from monai.networks.blocks import Convolution
 from monai.networks.blocks.upsample import UpSample
 
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from nnunetv2.utilities.network_initialization import InitWeights_He
 
 
@@ -309,6 +308,7 @@ class SSND(nn.Module):
         x = self.act(self.convnd(x))  # (b, d, h, w)
         y = self.forward_core(x)
         # assert y1.dtype == torch.float32
+        assert y.dtype == torch.float32
 
         y = self.out_norm(y)
         y = y * F.silu(z)
@@ -675,12 +675,17 @@ class PatchEmbed2D(nn.Module):
         super().__init__()
         if isinstance(patch_size, int):
             patch_size = (patch_size, patch_size) if spatial_dims == 2 else (patch_size, patch_size, patch_size)
+
         self.spatial_dims = spatial_dims
+
         self.proj = Convolution(spatial_dims=spatial_dims,
                                 in_channels=in_chans,
                                 out_channels=embed_dim,
                                 kernel_size=patch_size,
-                                strides=patch_size, conv_only=True)
+                                strides=patch_size,
+                                conv_only=True,
+                                padding=0)
+
         # nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
@@ -736,6 +741,7 @@ class GSC(nn.Module):
         # self.nonliner4 = nn.ReLU()
 
     def forward(self, x):
+        # print(f"{self.__class__.__name__} -> {x.shape=}")
         x_residual = x
 
         x1 = self.norm(x)
@@ -781,7 +787,9 @@ class VSSBlock(nn.Module):
         self.drop_path = DropPath(drop_path)
 
     def forward(self, input: torch.Tensor):
+        # print(f"{self.__class__.__name__} -> input = {input.shape}")
         input = permute(self.gsc(permute(input, self.spatial_dims, reverse=True)), self.spatial_dims)
+        # print(f"{self.__class__.__name__} -> input = {input.shape}")
         x = input + self.drop_path(self.self_attention(self.ln_1(input)))
         return x
 
@@ -845,11 +853,13 @@ class VSSLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x):
-        for blk in self.blocks:
+        # print(f"{self.__class__.__name__} -> x: {x.shape}")
+        for blk_index, blk in enumerate(self.blocks):
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x)
             else:
                 x = blk(x)
+                # print(f"{self.__class__.__name__} -> blk_index: {blk_index} --- x: {x.shape}")
 
         if self.downsample is not None:
             x = self.downsample(x)
@@ -868,7 +878,7 @@ class VSSMEncoder(nn.Module):
                  d_state=16,
                  drop_rate=0.,
                  attn_drop_rate=0.,
-                 drop_path_rate=0.1,
+                 drop_path_rate=0.2,
                  norm_layer=nn.LayerNorm,
                  patch_norm=True,
                  use_checkpoint=False,
@@ -911,6 +921,10 @@ class VSSMEncoder(nn.Module):
         self.layers = nn.ModuleList()
         self.downsamples = nn.ModuleList()
         dilations = dilations or [1] * self.num_layers
+
+        if scales is None:
+            raise ValueError("scales is not Set:)")
+
         for i_layer in range(self.num_layers):
             layer = VSSLayer(
                 spatial_dims=spatial_dims,
@@ -934,13 +948,20 @@ class VSSMEncoder(nn.Module):
                 #
                 # if i_layer == (self.num_layers - 2) and skip_last_downsample:
                 #     continue
-                if scales is not None:
-                    if np.prod(scales[i_layer]) != 1:
-                        self.downsamples.append(PatchMerging2D(spatial_dims=spatial_dims,
-                                                               input_dim=dims[i_layer],
-                                                               scale=scales[i_layer],
-                                                               output_features=dims[i_layer + 1],
-                                                               norm_layer=norm_layer))
+                # if scales is not None:
+
+                if np.prod(scales[i_layer]) != 1:
+                    self.downsamples.append(PatchMerging2D(spatial_dims=spatial_dims,
+                                                           input_dim=dims[i_layer],
+                                                           scale=scales[i_layer],
+                                                           output_features=dims[i_layer + 1],
+                                                           norm_layer=norm_layer))
+                # else:
+                #     self.downsamples.append(PatchMerging2D(spatial_dims=spatial_dims,
+                #                                                input_dim=dims[i_layer],
+                #                                                scale=scales[i_layer],
+                #                                                output_features=dims[i_layer + 1],
+                #                                                norm_layer=norm_layer))
         # self.norm = norm_layer(self.num_features)
         # self.avgpool = nn.AdaptiveAvgPool1d(1)
         # self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
@@ -985,15 +1006,18 @@ class VSSMEncoder(nn.Module):
         # if self.ape:
         #     x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
-
+        # print(f"{self.__class__.__name__} -> x: {x.shape}")
         for s, layer in enumerate(self.layers):
             x = layer(x)
             x_ret.append(permute(x, self.spatial_dims, reverse=True))
             if s < len(self.downsamples):
                 # if s == 0 and self.skip_first_downsample:
                 #     continue
+                # print(f"{self.__class__.__name__} -> before ds: {s=}, x: {x.shape}")
                 x = self.downsamples[s](x)
-
+                # print(f"{self.__class__.__name__} -> after ds: {s=}, x: {x.shape}")
+            # print(f"{self.__class__.__name__} -> {s=}, x: {x.shape}")
+        # print(f"{self.__class__.__name__} -> x_ret: {[xx.shape if xx is not None else 'None' for xx in x_ret]}")
         return x_ret
 
 
@@ -1037,6 +1061,14 @@ def get_scale_value(spatial_dims: int, input_patch_size, scales):
 
 
 def get_scales(spatial_dims, input_patch_size, n_layers, patch_size):
+    """
+    get_scales(spatial_dims, input_patch_size, n_layers - 1, patch_size)
+    :param spatial_dims:
+    :param input_patch_size:
+    :param n_layers:
+    :param patch_size:
+    :return:
+    """
     if input_patch_size is not None:
         scales = []
         if spatial_dims == 3:
@@ -1738,22 +1770,21 @@ def get_m2net_from_plans(
 
 def get_ssnd2net_from_plans(
         plans_manager: PlansManager,
-        dataset_json: dict,
         configuration_manager: ConfigurationManager,
         num_input_channels: int,
+        num_output_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True,
         small_mode: bool = False
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
     if not small_mode:
         model = SSND2Net(
             spatial_dims=len(configuration_manager.patch_size),
             factorization_type="cross-scan",
             in_ch=num_input_channels,
-            out_ch=label_manager.num_segmentation_heads,
+            out_ch=num_output_channels,
             deep_supervision=deep_supervision,
             input_patch_size=configuration_manager.patch_size
         )
@@ -1762,7 +1793,7 @@ def get_ssnd2net_from_plans(
             spatial_dims=len(configuration_manager.patch_size),
             factorization_type="cross-scan",
             in_ch=num_input_channels,
-            out_ch=label_manager.num_segmentation_heads,
+            out_ch=num_output_channels,
             deep_supervision=deep_supervision,
             input_patch_size=configuration_manager.patch_size
         )

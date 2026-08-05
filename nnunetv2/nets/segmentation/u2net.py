@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from nnunetv2.utilities.network_initialization import InitWeights_He
 
 

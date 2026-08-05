@@ -17,7 +17,7 @@ except ImportError:
 
 
 try:
-    from nnunetv2.nets.seg_mamba.selective_scan_interface import bimamba_inner_fn, mamba_inner_fn_no_out_proj, selective_scan_fn, mamba_inner_fn
+    from nnunetv2.nets.segmentation.seg_mamba.selective_scan_interface import bimamba_inner_fn, mamba_inner_fn_no_out_proj, selective_scan_fn, mamba_inner_fn
 except ImportError:
     print("[WARNING] Could not import bimamba_inner_fn")
     # mamba_inner_fn_no_out_proj, bimamba_inner_fn = None, None

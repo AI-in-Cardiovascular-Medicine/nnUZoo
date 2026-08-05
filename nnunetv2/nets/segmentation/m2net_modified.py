@@ -1,3 +1,7 @@
+from timm.layers import DropPath
+
+DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
+
 import math
 from functools import partial
 from typing import Union, List, Tuple, Callable
@@ -6,13 +10,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
 from einops import rearrange, repeat
+from timm.layers import DropPath, trunc_normal_
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 from monai.networks.blocks import Convolution
-from nnunetv2.utilities.network_initialization import InitWeights_He
+
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from timm.layers import DropPath, trunc_normal_
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
+from nnunetv2.utilities.network_initialization import InitWeights_He
+
+
+def get_dwconv_layer(
+        spatial_dims: int,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        bias: bool = False
+):
+    depth_conv = Convolution(spatial_dims=spatial_dims, in_channels=in_channels, out_channels=in_channels,
+                             strides=stride, kernel_size=kernel_size, bias=bias, conv_only=True, groups=in_channels)
+    point_conv = Convolution(spatial_dims=spatial_dims, in_channels=in_channels, out_channels=out_channels,
+                             strides=1, kernel_size=1, bias=bias, conv_only=True, groups=1)
+    return torch.nn.Sequential(depth_conv, point_conv)
 
 
 class REBNCONV(nn.Module):
@@ -20,6 +40,7 @@ class REBNCONV(nn.Module):
         super(REBNCONV, self).__init__()
 
         self.conv_s1 = nn.Conv2d(in_ch, out_ch, 3, padding=1 * dirate, dilation=1 * dirate)
+        # self.conv_s1 = get_dwconv_layer(spatial_dims=2, in_channels=in_ch, out_channels=out_ch)
         self.bn_s1 = nn.BatchNorm2d(out_ch)
         self.relu_s1 = nn.ReLU(inplace=True)
 
@@ -510,6 +531,81 @@ class PatchEmbed2D(nn.Module):
         return x
 
 
+def permute(x, spatial_dims: int, reverse=False):
+    if spatial_dims == 2:
+        if reverse:
+            x = x.permute(0, 3, 1, 2)
+        else:
+            x = x.permute(0, 2, 3, 1)
+    elif spatial_dims == 3:
+        if reverse:
+            x = x.permute(0, 4, 1, 2, 3)
+        else:
+            x = x.permute(0, 2, 3, 4, 1)
+    else:
+        raise ValueError
+    return x
+
+
+class InstanceNorm(nn.Module):
+    def __init__(self, spatial_dims: int,
+                 in_channels: int):
+        super().__init__()
+        if spatial_dims == 2:
+            self.layer = nn.InstanceNorm2d(in_channels)
+        elif spatial_dims == 3:
+            self.layer = nn.InstanceNorm3d(in_channels)
+
+    def forward(self, input):
+        return self.layer(input)
+
+
+class GSC(nn.Module):
+    def __init__(self, spatial_dims: int, in_channels) -> None:
+        super().__init__()
+
+        self.proj = get_dwconv_layer(spatial_dims, in_channels=in_channels, out_channels=in_channels,
+                                     stride=1, bias=True)
+        # Convolution(spatial_dims, in_ch, in_ch, kernel_size=3, strides=1, padding=1,
+        # conv_only=True)
+        self.norm = InstanceNorm(spatial_dims, in_channels)
+        self.nonliner = nn.ReLU()
+
+        self.proj2 = Convolution(spatial_dims, in_channels, in_channels,
+                                 kernel_size=1, strides=1, padding=0,
+                                 conv_only=True)
+        self.norm2 = InstanceNorm(spatial_dims, in_channels)
+        self.nonliner2 = nn.ReLU()
+
+        self.proj3 = get_dwconv_layer(spatial_dims, in_channels=in_channels, out_channels=in_channels,
+                                      stride=1, bias=True)
+        self.norm3 = InstanceNorm(spatial_dims, in_channels)
+        self.nonliner3 = nn.ReLU()
+
+        # self.proj4 = Convolution(spatial_dims, in_ch, in_ch, kernel_size=1, strides=1, padding=0,
+        #                          conv_only=True)
+        # self.norm4 = InstanceNorm(spatial_dims, in_ch)
+        # self.nonliner4 = nn.ReLU()
+
+    def forward(self, x):
+        x_residual = x
+
+        x1 = self.norm(x)
+        x1 = self.proj(x1)
+        x1 = self.nonliner(x1)
+
+        x2 = self.norm2(x)
+        x2 = self.proj2(x2)
+        x2 = self.nonliner2(x2)
+
+        x = x1 + x2
+        x3 = self.norm3(x)
+        x3 = self.proj3(x3)
+        x3 = self.nonliner3(x3)
+
+        return x3 + x_residual
+
+
 class VSSBlock(nn.Module):
     def __init__(
             self,
@@ -521,11 +617,14 @@ class VSSBlock(nn.Module):
             **kwargs,
     ):
         super().__init__()
+        self.spatial_dims = 2
+        self.gsc = GSC(spatial_dims=self.spatial_dims, in_channels=hidden_dim)
         self.ln_1 = norm_layer(hidden_dim)
         self.self_attention = SS2D(d_model=hidden_dim, dropout=attn_drop_rate, d_state=d_state, **kwargs)
         self.drop_path = DropPath(drop_path)
 
     def forward(self, input: torch.Tensor):
+        input = permute(self.gsc(permute(input, self.spatial_dims, reverse=True)), self.spatial_dims)
         x = input + self.drop_path(self.self_attention(self.ln_1(input)))
         return x
 
@@ -613,7 +712,7 @@ class VSSMEncoder(nn.Module):
         if isinstance(dims, int):
             dims = [int(dims * 2 ** i_layer) for i_layer in range(self.num_layers)]
         if self.add_last:
-            self.rebnconvin = REBNCONV(in_chans, out_ch, dirate=1)
+            self.rebnconvin = get_dwconv_layer(2, in_chans, out_ch)
         self.embed_dim = dims[0]
         # self.num_features = dims[-1]
         self.dims = dims
@@ -802,7 +901,7 @@ class RSU4F(nn.Module):  # UNet04FRES(nn.Module):
 
 
 ##### M^2-Net ####
-class M2Net(nn.Module):
+class M2NetModified(nn.Module):
 
     def __init__(self, in_ch: int, out_ch: int, deep_supervision: bool):
         super().__init__()
@@ -825,12 +924,12 @@ class M2Net(nn.Module):
         self.patch_merging4 = PatchMerging2D(256, scale=2)  # in: 256, 28, 28 -> out: 512, 14, 14
 
         self.stage5 = RSU4F(512, 256, 512)
-        self.pool56 = nn.MaxPool2d(2, stride=2, ceil_mode=True)  # in: 512, 14, 14 -> out: 512, 7, 7
+        # self.pool56 = nn.MaxPool2d(2, stride=2, ceil_mode=True)  # in: 512, 14, 14 -> out: 512, 7, 7
 
-        self.stage6 = RSU4F(512, 256, 512)  # in: 512, 7, 7 -> 512, 7, 7
+        self.stage6 = RSU4F(512, 512, 1024)  # in: 512, 7, 7 -> 512, 7, 7
 
         # decoder
-        self.stage5d = RSU4F(1024, 256, 512)  # in: 1024, 14, 14 -> 512, 14, 14
+        self.stage5d = RSU4F(1536, 512, 512)  # in: 1024, 14, 14 -> 512, 14, 14
 
         self.patch_expand4d = PatchExpand(
             dim=512,
@@ -876,7 +975,7 @@ class M2Net(nn.Module):
         self.side3 = nn.Conv2d(128, out_ch, 3, padding=1)
         self.side4 = nn.Conv2d(256, out_ch, 3, padding=1)
         self.side5 = nn.Conv2d(512, out_ch, 3, padding=1)
-        self.side6 = nn.Conv2d(512, out_ch, 3, padding=1)
+        self.side6 = nn.Conv2d(1024, out_ch, 3, padding=1)
 
         self.outconv = nn.Conv2d(6 * out_ch, out_ch, 1)
 
@@ -901,7 +1000,7 @@ class M2Net(nn.Module):
 
         # stage 5
         hx5 = self.stage5(hx)
-        hx = self.pool56(hx5)
+        # hx = self.pool56(hx5)
 
         # stage 6
         hx6 = self.stage6(hx)
@@ -1008,7 +1107,7 @@ class UnetDecoderUpSampleLayer(nn.Module):
         return x
 
 
-class M2NetP(nn.Module):
+class M2NetPModified(nn.Module):
 
     def __init__(self, in_ch: int, out_ch: int, deep_supervision: bool, spatial_dims: int = 2):
         super().__init__()
@@ -1042,7 +1141,7 @@ class M2NetP(nn.Module):
             dim=128,
             scale=2,
             norm_layer=nn.LayerNorm,
-            # output_dim=64,
+            # output_dim=128,
         )  # 128, 14, 14 -> 64, 28, 28
         # -> concat -> 128, 28, 28
 
@@ -1055,7 +1154,7 @@ class M2NetP(nn.Module):
             dim=128,
             scale=2,
             norm_layer=nn.LayerNorm,
-            # output_dim=64,
+            # output_dim=128,
         )  # 256, 28, 28 -> 128, 56, 56
         # concat -> 256, 56, 56
         # self.concat_back_dim3d = nn.Linear(256, 128)  # 128 56 56
@@ -1072,7 +1171,7 @@ class M2NetP(nn.Module):
         # self.concat_back_dim2d = nn.Linear(128, 64)  # 64, 112, 112
         self.stage2d = MU(in_ch=128, mid_ch=16, out_ch=128, n_layers=6, patch_size=1,
                           skip_last_downsample=True, add_last=True)  # 64, 112, 112
-        # self.patch_expand1d = UnetDecoderUpSampleLayer(spatial_dims=spatial_dims, in_ch=128)
+        self.patch_expand1d = UnetDecoderUpSampleLayer(spatial_dims=spatial_dims, in_ch=128)
         self.patch_expand1d = PatchExpand(
             dim=128,
             scale=2,
@@ -1090,8 +1189,16 @@ class M2NetP(nn.Module):
         self.side4 = nn.Conv2d(128, out_ch, 3, padding=1)
         self.side5 = nn.Conv2d(128, out_ch, 3, padding=1)
         self.side6 = nn.Conv2d(64, out_ch, 3, padding=1)
-
         self.outconv = nn.Conv2d(6 * out_ch, out_ch, 1)
+
+        # self.side1 = get_dwconv_layer(spatial_dims=2, in_channels=128, out_channels=out_ch)
+        # self.side2 = get_dwconv_layer(spatial_dims=2, in_channels=128, out_channels=out_ch)
+        # self.side3 = get_dwconv_layer(spatial_dims=2, in_channels=128, out_channels=out_ch)
+        # self.side4 = get_dwconv_layer(spatial_dims=2, in_channels=128, out_channels=out_ch)
+        # self.side5 = get_dwconv_layer(spatial_dims=2, in_channels=128, out_channels=out_ch)
+        # self.side6 = get_dwconv_layer(spatial_dims=2, in_channels=64, out_channels=out_ch)
+        #
+        # self.outconv = get_dwconv_layer(spatial_dims=2, in_channels=6 * out_ch, out_channels=out_ch)
 
     def forward(self, x):
         hx = x
@@ -1170,7 +1277,8 @@ class M2NetP(nn.Module):
 
     @torch.no_grad()
     def freeze_encoder(self):
-        for group in [self.stage1, self.stage2, self.stage3, self.stage4, self.stage5, self.stage6, self.patch_merging1,
+        for group in [self.stage1, self.stage2, self.stage3, self.stage4, self.stage5, self.stage6,
+                      self.patch_merging1,
                       self.patch_merging2, self.patch_merging3, self.patch_merging4, self.pool56]:
             for name, param in group.named_parameters():
                 # if "patch_embed" not in name:
@@ -1178,27 +1286,27 @@ class M2NetP(nn.Module):
 
     @torch.no_grad()
     def unfreeze_encoder(self):
-        for group in [self.stage1, self.stage2, self.stage3, self.stage4, self.stage5, self.stage6, self.patch_merging1,
+        for group in [self.stage1, self.stage2, self.stage3, self.stage4, self.stage5, self.stage6,
+                      self.patch_merging1,
                       self.patch_merging2, self.patch_merging3, self.patch_merging4, self.pool56]:
             for param in group.parameters():
                 param.requires_grad = True
 
 
-def get_m2net_from_plans(
+def get_m2net_modified_from_plans(
         plans_manager: PlansManager,
-        dataset_json: dict,
         configuration_manager: ConfigurationManager,
         num_input_channels: int,
+        num_output_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
 
-    model = M2Net(in_ch=num_input_channels,
-                  out_ch=label_manager.num_segmentation_heads,
-                  deep_supervision=deep_supervision)
+    model = M2NetModified(in_ch=num_input_channels,
+                          out_ch=num_output_channels,
+                          deep_supervision=deep_supervision)
     model.apply(InitWeights_He(1e-2))
     model.apply(init_last_bn_before_add_to_0)
 
@@ -1208,21 +1316,20 @@ def get_m2net_from_plans(
     return model
 
 
-def get_m2netp_from_plans(
+def get_m2netp_modified_from_plans(
         plans_manager: PlansManager,
-        dataset_json: dict,
         configuration_manager: ConfigurationManager,
         num_input_channels: int,
+        num_output_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
 
-    model = M2NetP(in_ch=num_input_channels,
-                   out_ch=label_manager.num_segmentation_heads,
-                   deep_supervision=deep_supervision)
+    model = M2NetPModified(in_ch=num_input_channels,
+                           out_ch=num_output_channels,
+                           deep_supervision=deep_supervision)
     model.apply(InitWeights_He(1e-2))
     model.apply(init_last_bn_before_add_to_0)
 
@@ -1238,14 +1345,10 @@ if __name__ == '__main__':
     # print(output.shape)
     from torchinfo import summary
 
-    patch_size = [
-        320,
-        192
-    ]
-    model = M2Net(3, 2, True).to("cuda:0")
-    output = model(torch.rand(size=(1, 3, *patch_size)).to("cuda:0"))
+    model = M2NetPModified(3, 5, True).to("cuda:0")
+    output = model(torch.rand(size=(1, 3, 256, 256)).to("cuda:0"))
     for x in output:
         print(x.shape)
 
-    summary(model, input_size=[1, 3] + patch_size)
+    summary(model, input_size=[1, 3] + [256, 256])
     # print(output.shape)

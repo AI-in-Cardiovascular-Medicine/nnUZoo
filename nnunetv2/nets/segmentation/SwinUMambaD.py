@@ -15,7 +15,7 @@ from timm.layers import DropPath, trunc_normal_
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from nnunetv2.utilities.network_initialization import InitWeights_He
 
 
@@ -696,15 +696,14 @@ def load_pretrained_ckpt(
 
 def get_swin_umamba_d_from_plans(
         plans_manager: PlansManager,
-        dataset_json: dict,
         configuration_manager: ConfigurationManager,
         num_input_channels: int,
+        num_output_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True
 ):
     dim = len(configuration_manager.conv_kernel_sizes[0])
     assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
 
     vss_args = dict(
         in_chans=num_input_channels,
@@ -714,7 +713,7 @@ def get_swin_umamba_d_from_plans(
     )
 
     decoder_args = dict(
-        num_classes=label_manager.num_segmentation_heads,
+        num_classes=num_output_channels,
         deep_supervision=deep_supervision,
         drop_path_rate=0.2,
         d_state=16,

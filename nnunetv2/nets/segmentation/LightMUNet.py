@@ -1,4 +1,4 @@
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from einops import rearrange
 from torchinfo import summary
 import torch
@@ -9,7 +9,7 @@ from monai.networks.blocks.segresnet_block import get_conv_layer, get_upsample_l
 from monai.networks.layers.factories import Dropout
 from monai.networks.layers.utils import get_act_layer, get_norm_layer
 from monai.utils import UpsampleMode
-from nnunetv2.nets.mask_funcs import window_masking, patchify, unpatchify
+from nnunetv2.nets.core.mask_funcs import window_masking
 
 from nnunetv2.utilities.network_initialization import InitWeights_He
 

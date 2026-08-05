@@ -3,15 +3,10 @@ from timm.layers import DropPath
 DropPath.__repr__ = lambda self: f"timm.DropPath({self.drop_prob})"
 
 from einops import repeat
-from timm.layers import DropPath
-
-from collections.abc import Sequence
-
-from monai.networks.nets.vit import ViT
-from monai.utils import ensure_tuple_rep
+from timm.layers import DropPath, trunc_normal_
 
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from nnunetv2.utilities.network_initialization import InitWeights_He
 
 import collections
@@ -28,12 +23,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
+from mamba_ssm import Mamba
+from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
 from monai.networks.blocks import Convolution
 from monai.networks.blocks import UnetrBasicBlock, UnetrPrUpBlock, UnetrUpBlock
 from monai.networks.blocks.dynunet_block import UnetOutBlock
 from monai.networks.blocks.upsample import UpSample
 from monai.utils import UpsampleMode, InterpolateMode
-# from prettytable import PrettyTable
+from prettytable import PrettyTable
 from torch import Tensor
 from torch.nn import functional as F
 
@@ -691,7 +688,7 @@ def create_block(
     # if use_nd:
     #     transpose = False
     #     reverse = False
-    # mixer_cls = partial(UNETR, layer_idx=layer_idx, n_dim=n_dim, **ssm_cfg, **factory_kwargs)
+    # mixer_cls = partial(MambaND, layer_idx=layer_idx, n_dim=n_dim, **ssm_cfg, **factory_kwargs)
     # mixer_cls = partial(Mamba2D if is_2d else Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
     mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
     norm_cls = partial(
@@ -723,6 +720,581 @@ def create_block(
     )
     block.layer_idx = layer_idx
     return block
+
+
+class MambaNDCore(nn.Module):
+
+    def __init__(self,
+                 spatial_dims: int,
+                 img_size=224,
+                 patch_size=16,
+                 in_channels=3,
+                 drop_rate=0.,
+                 drop_path_rate=0.,
+                 norm_cfg=dict(type='LN', eps=1e-6),
+                 final_norm=True,
+                 frozen_stages=-1,
+                 interpolate_mode='bicubic',
+                 pre_norm=False,
+                 expand=None,
+                 inflate_len=False,
+                 # is_1d=False,
+                 # is_2d=True,
+                 use_v2=False,
+                 force_a2=False,
+                 fused_add_norm=True,
+                 split_head=False,
+                 pretrained=None,
+                 pretrained2d=True,
+                 dt_scale=0.0,
+                 use_nd=False,
+                 force_2d=False,
+                 update_interval=None,
+                 copy_weight=False,
+                 factorization=None,
+                 inlfate_policy=None,
+                 n_dim_pos=4,
+                 num_layers=None,
+                 single_dir=False,
+                 embed_dims: int = 96,
+                 d_state=16):
+        super(MambaNDCore, self).__init__()
+        self.spatial_dims = spatial_dims
+        self.embed_dims = embed_dims
+        self.force_2d = force_2d
+        self.use_nd = use_nd
+        self.inlfate_policy = inlfate_policy
+        self.pretrained2d = pretrained2d
+        self.pretrained = pretrained
+        self.n_dim_pos = n_dim_pos
+        self.factorization = factorization
+        self.inflate_len = inflate_len
+        self.update_interval = update_interval
+        self.copy_weight = copy_weight
+
+        self.img_size = img_size  # [::-1]
+        self.num_layers = num_layers
+
+        self.patch_embed = PatchEmbed(
+            spatial_dims=spatial_dims,
+            in_channels=in_channels,
+            input_size=self.img_size,
+            embed_dims=self.embed_dims,
+            conv_type='Conv3d',
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=not pre_norm,  # disable bias if pre_norm is used(e.g., CLIP)
+            padding=(0, 0, 0),
+            dilation=(1, 1, 1)
+
+        )
+        self.patch_resolution = self.patch_embed.init_out_size
+        self.patch_resolution = (self.patch_resolution[0], self.patch_resolution[1], self.patch_resolution[1])
+        # num_patches = self.patch_resolution[0] * self.patch_resolution[1] * self.patch_resolution[1]
+        # self.is_1d = is_1d
+        # Set out type
+        # if out_type not in self.OUT_TYPES:
+        #     raise ValueError(f'Unsupported `out_type` {out_type}, please '
+        #                      f'choose from {self.OUT_TYPES}')
+        # self.out_type = out_type
+
+        # Set position embedding
+        self.interpolate_mode = interpolate_mode
+        # self.pos_embed = nn.Parameter(
+        #     torch.zeros(1, num_patches, self.embed_dims))
+        # self._register_load_state_dict_pre_hook(self._prepare_pos_embed)
+
+        self.drop_after_pos = nn.Dropout(p=drop_rate)
+
+        # if isinstance(out_indices, int):
+        #     out_indices = [out_indices]
+        # assert isinstance(out_indices, Sequence), \
+        #     f'"out_indices" must by a sequence or int, ' \
+        #     f'get {type(out_indices)} instead.'
+        # for i, index in enumerate(out_indices):
+        #     if index < 0:
+        #         out_indices[i] = self.num_layers + index
+        # assert 0 <= out_indices[i] <= self.num_layers, \
+        #     f'Invalid out_indices {index}'
+        # self.out_indices = out_indices
+
+        # stochastic depth decay rule
+        dpr = np.linspace(0, drop_path_rate, self.num_layers)
+
+        self.layers = nn.ModuleList()
+        ssm_cfg = {"d_state": d_state}
+        # if use_v2 and is_2d:
+        #     ssm_cfg['use_v2'] = use_v2
+        if force_a2:
+            ssm_cfg['force_a2'] = force_a2
+        if dt_scale > 0:
+            ssm_cfg['dt_scale'] = dt_scale
+        if expand is not None:
+            ssm_cfg['ssm_ratio'] = expand
+        for i in range(self.num_layers):
+            self.layers.append(
+                create_block(
+                    spatial_dims=spatial_dims,
+                    d_model=self.embed_dims,
+                    ssm_cfg=ssm_cfg,
+                    fused_add_norm=fused_add_norm,
+                    residual_in_fp32=True,
+                    drop_rate=drop_rate,
+                    drop_path_rate=dpr[i],
+                    reverse=(not split_head) and (not single_dir) and (i % 2) > 0,
+                    # transpose=(not split_head) and has_transpose and (i % 4) >= 2,
+                    # use_mlp=use_mlp,
+                    rms_norm=False,
+                    # split_head=split_head,
+                    # use_nd=self.use_nd,
+                )
+            )
+        self.frozen_stages = frozen_stages
+        if pre_norm:
+            self.pre_norm = build_norm_layer(norm_cfg, self.embed_dims)
+        else:
+            self.pre_norm = nn.Identity()
+
+        self.final_norm = final_norm
+        # if self.out_type == 'avg_featmap':
+        #     self.ln1 = nn.Identity()
+        #     self.ln2 = build_norm_layer(norm_cfg_2, self.embed_dims)
+        if final_norm:
+            self.ln1 = build_norm_layer(norm_cfg, self.embed_dims)
+        else:
+            self.ln1 = nn.Identity()
+        if self.frozen_stages > 0:
+            self._freeze_stages()
+
+    @property
+    def norm1(self):
+        return self.ln1
+
+    @property
+    def norm2(self):
+        return self.ln2
+
+    def init_weights(self):
+        # super(VisionMamba, self).init_weights()
+
+        if not (isinstance(self.init_cfg, dict)
+                and self.init_cfg['type'] == 'Pretrained'):
+            if self.pos_embed is not None:
+                trunc_normal_(self.pos_embed, std=0.02)
+        if self.pretrained2d:
+            print(f'load model from: {self.pretrained}')
+        else:
+            if self.pretrained:
+                self.init_cfg = dict(
+                    type='Pretrained', checkpoint=self.pretrained)
+            super().init_weights()
+
+    def _prepare_pos_embed(self, state_dict, prefix, *args, **kwargs):
+        name = prefix + 'pos_embed'
+        if name not in state_dict.keys():
+            return
+
+        ckpt_pos_embed_shape = state_dict[name].shape
+        if (not self.with_cls_token
+                and ckpt_pos_embed_shape[1] == self.pos_embed.shape[1] + 1):
+            # Remove cls token from state dict if it's not used.
+            state_dict[name] = state_dict[name][:, 1:]
+            ckpt_pos_embed_shape = state_dict[name].shape
+
+        if self.pos_embed.shape != ckpt_pos_embed_shape:
+            from mmengine.logging import MMLogger
+            logger = MMLogger.get_current_instance()
+            logger.info(
+                f'Resize the pos_embed shape from {ckpt_pos_embed_shape} '
+                f'to {self.pos_embed.shape}.')
+
+            ckpt_pos_embed_shape = to_2tuple(
+                int(np.sqrt(ckpt_pos_embed_shape[1] - self.num_extra_tokens)))
+            pos_embed_shape = self.patch_embed.init_out_size
+
+            state_dict[name] = resize_pos_embed(state_dict[name],
+                                                ckpt_pos_embed_shape,
+                                                pos_embed_shape,
+                                                self.interpolate_mode,
+                                                self.num_extra_tokens)
+
+    @staticmethod
+    def resize_pos_embed(*args, **kwargs):
+        """Interface for backward-compatibility."""
+        return resize_pos_embed(*args, **kwargs)
+
+    def _freeze_stages(self):
+        # freeze position embedding
+        if self.pos_embed is not None:
+            self.pos_embed.requires_grad = False
+        # set dropout to eval model
+        self.drop_after_pos.eval()
+        # freeze patch embedding
+        self.patch_embed.eval()
+        for param in self.patch_embed.parameters():
+            param.requires_grad = False
+        # freeze pre-norm
+        for param in self.pre_norm.parameters():
+            param.requires_grad = False
+        # freeze cls_token
+        if self.cls_token is not None:
+            self.cls_token.requires_grad = False
+        # freeze layers
+        for i in range(1, self.frozen_stages + 1):
+            m = self.layers[i - 1]
+            m.eval()
+            for param in m.parameters():
+                param.requires_grad = False
+        # freeze the last layer norm
+        if self.frozen_stages == len(self.layers):
+            if self.final_norm:
+                self.ln1.eval()
+                for param in self.ln1.parameters():
+                    param.requires_grad = False
+
+            if self.out_type == 'avg_featmap':
+                self.ln2.eval()
+                for param in self.ln2.parameters():
+                    param.requires_grad = False
+
+    def forward(self, x):
+        b, *_, h, w = x.shape
+        x, patch_resolution = self.patch_embed(x)
+        if self.spatial_dims == 3:
+            patch_resolution = (patch_resolution[0], patch_resolution[1], patch_resolution[1])  # TODO: why both are 1?
+
+        x = self.drop_after_pos(x)
+
+        x = self.pre_norm(x)
+
+        outs = []
+        residual = None
+        if self.spatial_dims == 3:
+            orders = (
+                't h w',
+                't w h',
+                'w h t'
+            )
+        else:
+            orders = (
+                't h w',
+                't w h',
+            )
+
+        n_dim_pos = [self.n_dim_pos] * len(orders)
+        if self.spatial_dims == 3:
+            shape = (patch_resolution[0], patch_resolution[1], patch_resolution[2])
+        else:
+            shape = (patch_resolution[0], patch_resolution[1])
+
+        for i, blk in enumerate(self.layers):
+            z = i // 2
+            d = z % len(orders)
+
+            x = blk(x, order=orders[d], shape=shape, n_dim_pos=n_dim_pos[d])
+            if i == len(self.layers) - 1:
+                x = (x + residual) if residual is not None else x
+            if i == len(self.layers) - 1 and self.final_norm:
+                x = self.ln1(x)
+            # if i in self.out_indices:
+            outs.append(x)
+        return outs[-1], outs
+
+    def count_parameters(self, model=None):
+        if model is None:
+            model = self
+        table = PrettyTable(["Modules", "Parameters"])
+        total_params = 0
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            params = parameter.numel()
+            table.add_row([name, params])
+            total_params += params
+        self.total_parms = total_params
+        print(table)
+        print(f"Total Trainable Params: {total_params}")
+        return total_params
+
+    def get_layer_depth(self, param_name: str, prefix: str = ''):
+        """Get the layer-wise depth of a parameter.
+
+        Args:
+            param_name (str): The name of the parameter.
+            prefix (str): The prefix for the parameter.
+                Defaults to an empty string.
+
+        Returns:
+            Tuple[int, int]: The layer-wise depth and the num of layers.
+
+        Note:
+            The first depth is the stem module (``layer_depth=0``), and the
+            last depth is the subsequent module (``layer_depth=num_layers-1``)
+        """
+        num_layers = self.num_layers + 2
+
+        if not param_name.startswith(prefix):
+            # For subsequent module like head
+            return num_layers - 1, num_layers
+
+        param_name = param_name[len(prefix):]
+
+        if param_name in ('cls_token', 'pos_embed'):
+            layer_depth = 0
+        elif param_name.startswith('patch_embed'):
+            layer_depth = 0
+        elif param_name.startswith('layers'):
+            layer_id = int(param_name.split('.')[1])
+            layer_depth = layer_id + 1
+        else:
+            layer_depth = num_layers - 1
+
+        return layer_depth, num_layers
+
+
+class MambaND(nn.Module):
+    """
+    UNETR based on: "Hatamizadeh et al.,
+    UNETR: Transformers for 3D Medical Image Segmentation <https://arxiv.org/abs/2103.10504>"
+    """
+
+    def __init__(
+            self,
+            spatial_dims: int,
+            in_channels: int,
+            out_channels: int,
+            img_size: Tuple[int, int, int],
+            feature_size: int = 16,
+            hidden_size: int = 768,
+            norm_name: Union[Tuple, str] = "instance",
+            conv_block: bool = False,
+            res_block: bool = True,
+            dropout_rate: float = 0.0,
+            num_layers: int = 7,
+            patch_size: tuple[int, ...] = (16, 16, 16),
+            decoder_scale: tuple[int, ...] = (2, 2, 2, 2),
+            encoder_scale: tuple[int, ...] = (2, 2, 2),
+            encoder_layers: tuple[int, ...] = (2, 1, 0),
+    ) -> None:
+        """
+        Args:
+            in_channels: dimension of input channels.
+            out_channels: dimension of output channels.
+            img_size: dimension of input image.
+            feature_size: dimension of network feature size.
+            hidden_size: dimension of hidden layer.
+            norm_name: feature normalization type and arguments.
+            conv_block: bool argument to determine if convolutional block is used.
+            res_block: bool argument to determine if residual block is used.
+            dropout_rate: faction of the input units to drop.
+
+        Examples::
+
+            # for single channel input 4-channel output with patch size of (96,96,96), feature size of 32 and batch norm
+            # >>> net = MambaND(in_ch=1, out_ch=4, img_size=(96,96,96), feature_size=32, norm_name='batch')
+
+            # for 4-channel input 3-channel output with patch size of (128,128,128), conv position embedding and instance norm
+            # >>> net = MambaND(in_ch=4, out_ch=3, img_size=(128,128,128), pos_embed='conv', norm_name='instance')
+
+        """
+
+        super().__init__()
+
+        if not (0 <= dropout_rate <= 1):
+            raise AssertionError("dropout_rate should be between 0 and 1.")
+
+        # self.num_layers = 12
+        self.spatial_dims = spatial_dims
+        self.feature_size = feature_size
+        self.patch_size = patch_size[:spatial_dims]
+        self.feat_size = self.get_feat_size(spatial_dims, img_size, patch_size)
+
+        # def get_encoder(num: int, patch_size):
+        #     z, h, w = self.patch_size
+        #     import numpy as np
+        #     z_scale = int(np.log2(z))
+        #     h_scale = int(np.log2(h))
+        #     w_scale = int(np.log2(w))
+        #     return ([2] * z_scale + [1] * (num - z_scale),
+        #             [2] * h_scale + [1] * (num - h_scale),
+        #             [2] * w_scale + [1] * (num - w_scale))
+
+        # encoder_scale = get_encoder(3, self.patch_size)
+        # decoder_scale = get_encoder(4, self.patch_size)
+        self.img_size = img_size
+        self.hidden_size = hidden_size
+        self.classification = False
+        self.out_indices = [int(item) for item in np.linspace(2, num_layers - 1, 3)]  # [3, 6, 9]
+        self.mamba = MambaNDCore(
+            spatial_dims=spatial_dims,
+            in_channels=in_channels,
+            img_size=img_size,
+            patch_size=self.patch_size,
+            embed_dims=hidden_size,
+            # out_type='featmap',
+            drop_path_rate=dropout_rate,
+            final_norm=False,
+            fused_add_norm=False,
+            drop_rate=dropout_rate,
+            d_state=16,
+            # is_2d=False,
+            # use_v2=False,
+            force_a2=False,
+            pretrained=None,
+            # use_mlp=False,
+            num_layers=num_layers,
+            # out_indices=list(range(0, 24, 2))
+        )
+
+        self.encoder1 = UnetrBasicBlock(
+            spatial_dims=spatial_dims,
+            in_channels=in_channels,
+            out_channels=feature_size,
+            kernel_size=3,
+            stride=1,
+            norm_name=norm_name,
+            res_block=res_block,
+
+        )
+        self.encoder2 = UnetrPrUpBlock(
+            spatial_dims=spatial_dims,
+            in_channels=hidden_size,
+            out_channels=feature_size * 2,
+            num_layer=encoder_layers[0],
+            kernel_size=3,
+            stride=1,
+            upsample_kernel_size=encoder_scale[2],
+            norm_name=norm_name,
+            conv_block=conv_block,
+            res_block=res_block,
+
+        )
+        self.encoder3 = UnetrPrUpBlock(
+            spatial_dims=spatial_dims,
+            in_channels=hidden_size,
+            out_channels=feature_size * 4,
+            num_layer=encoder_layers[1],
+            kernel_size=3,
+            stride=1,
+            upsample_kernel_size=encoder_scale[1],
+            norm_name=norm_name,
+            conv_block=conv_block,
+            res_block=res_block,
+        )
+        self.encoder4 = UnetrPrUpBlock(
+            spatial_dims=spatial_dims,
+            in_channels=hidden_size,
+            out_channels=feature_size * 8,
+            num_layer=encoder_layers[2],
+            kernel_size=3,
+            stride=1,
+            upsample_kernel_size=encoder_scale[0],
+            norm_name=norm_name,
+            conv_block=conv_block,
+            res_block=res_block,
+        )
+        self.decoder5 = UnetrUpBlock(
+            spatial_dims=spatial_dims,
+            in_channels=hidden_size,
+            out_channels=feature_size * 8,
+            kernel_size=3,
+            upsample_kernel_size=decoder_scale[0],
+            norm_name=norm_name,
+            res_block=res_block,
+        )
+        self.decoder4 = UnetrUpBlock(
+            spatial_dims=spatial_dims,
+            in_channels=feature_size * 8,
+            out_channels=feature_size * 4,
+            kernel_size=3,
+            upsample_kernel_size=decoder_scale[1],
+            norm_name=norm_name,
+            res_block=res_block,
+        )
+        self.decoder3 = UnetrUpBlock(
+            spatial_dims=spatial_dims,
+            in_channels=feature_size * 4,
+            out_channels=feature_size * 2,
+            kernel_size=3,
+            upsample_kernel_size=decoder_scale[2],
+            norm_name=norm_name,
+            res_block=res_block,
+        )
+        self.decoder2 = UnetrUpBlock(
+            spatial_dims=spatial_dims,
+            in_channels=feature_size * 2,
+            out_channels=feature_size,
+            kernel_size=3,
+            upsample_kernel_size=decoder_scale[3],
+            norm_name=norm_name,
+            res_block=res_block,
+        )
+        self.out = UnetOutBlock(spatial_dims=spatial_dims, in_channels=feature_size,
+                                out_channels=out_channels)  # type: ignore
+
+    @staticmethod
+    def get_feat_size(spatial_dims: int, img_size, patch_size):
+        if spatial_dims == 3:
+            return (
+                int(img_size[0] // patch_size[0]),
+                int(img_size[1] // patch_size[1]),
+                int(img_size[2] // patch_size[2]),
+            )
+        elif spatial_dims == 2:
+            return (
+                int(img_size[0] // patch_size[0]),
+                int(img_size[1] // patch_size[1]),
+            )
+
+    @staticmethod
+    def proj_feat(spatial_dims: int, x, hidden_size, feat_size):
+        x = x.view(x.size(0), *feat_size, hidden_size)
+        x = permute(x, spatial_dims=spatial_dims, reverse=True).contiguous()
+        # x = x.permute(0, 4, 1, 2, 3).contiguous()
+        return x
+
+    def load_from(self, weights):
+        with torch.no_grad():
+            # copy weights from patch embedding
+            for i in weights["state_dict"]:
+                print(i)
+            self.mamba.patch_embedding.position_embeddings.copy_(
+                weights["state_dict"]["module.transformer.patch_embedding.position_embeddings_3d"]
+            )
+            self.mamba.patch_embedding.cls_token.copy_(
+                weights["state_dict"]["module.transformer.patch_embedding.cls_token"]
+            )
+            self.mamba.patch_embedding.patch_embeddings[1].weight.copy_(
+                weights["state_dict"]["module.transformer.patch_embedding.patch_embeddings.1.weight"]
+            )
+            self.mamba.patch_embedding.patch_embeddings[1].bias.copy_(
+                weights["state_dict"]["module.transformer.patch_embedding.patch_embeddings.1.bias"]
+            )
+
+            # copy weights from  encoding blocks (default: num of blocks: 12)
+            for bname, block in self.mamba.blocks.named_children():
+                print(block)
+                block.loadFrom(weights, n_block=bname)
+            # last norm layer of transformer
+            self.mamba.norm.weight.copy_(weights["state_dict"]["module.transformer.norm.weight"])
+            self.mamba.norm.bias.copy_(weights["state_dict"]["module.transformer.norm.bias"])
+
+    def forward(self, x_in):
+        x, hidden_states_out = self.mamba(x_in)
+        enc1 = self.encoder1(x_in)
+        x2 = hidden_states_out[self.out_indices[0]]
+        enc2 = self.encoder2(self.proj_feat(self.spatial_dims, x2, self.hidden_size, self.feat_size))
+        x3 = hidden_states_out[self.out_indices[1]]
+        enc3 = self.encoder3(self.proj_feat(self.spatial_dims, x3, self.hidden_size, self.feat_size))
+        x4 = hidden_states_out[self.out_indices[2]]
+        enc4 = self.encoder4(self.proj_feat(self.spatial_dims, x4, self.hidden_size, self.feat_size))
+        dec4 = self.proj_feat(self.spatial_dims, x, self.hidden_size, self.feat_size)
+        dec3 = self.decoder5(dec4, enc4)
+        dec2 = self.decoder4(dec3, enc3)
+        dec1 = self.decoder3(dec2, enc2)
+        out = self.decoder2(dec1, enc1)
+        logits = self.out(out)
+        return logits
 
 
 def get_scales(spatial_dims, input_patch_size, n_layers, patch_size):
@@ -1023,106 +1595,100 @@ class PatchExpand(nn.Module):
         return x
 
 
-class UNETR2Net(nn.Module):
+class MambaND2Net(nn.Module):
 
     def __init__(self,
                  spatial_dims: int,
-                 in_channels: int, out_channels: int, deep_supervision: bool,
-                 input_patch_size, add_last: bool = True):
-        super(UNETR2Net, self).__init__()
+                 in_ch: int, out_ch: int, deep_supervision: bool,
+                 input_patch_size):
+        super(MambaND2Net, self).__init__()
         self.spatial_dims = spatial_dims
         self.deep_supervision = deep_supervision
         self.input_patch_size = input_patch_size
         scales = get_scales(spatial_dims, input_patch_size, n_layers=5, patch_size=None)
         self.scales = scales
-        self.stage1 = UNETR(spatial_dims=spatial_dims,
-                            in_channels=in_channels,
-                            out_channels=32,
-                            feature_size=4,
-                            hidden_size=96,
-                            num_layers=7,
-                            patch_size=(16, 16, 16),
-                            img_size=input_patch_size,
-                            add_last=add_last,
-                            # decoder_scale=(2, 2, 2, 2),
-                            # encoder_layers=(2, 1, 0),
-                            )
+        self.stage1 = MambaND(spatial_dims=spatial_dims,
+                              in_channels=in_ch,
+                              out_channels=32,
+                              feature_size=4,
+                              hidden_size=96,
+                              num_layers=7,
+                              patch_size=(16, 16, 16),
+                              img_size=input_patch_size,
+                              # decoder_scale=(2, 2, 2, 2),
+                              # encoder_layers=(2, 1, 0),
+                              )
         # self.pool12 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
         self.patch_merging1 = PatchMerging2D(spatial_dims, 32, scale=scales[0], output_features=64)
         # in: 32, 224, 224 -> out: 64, 112, 112
 
-        self.stage2 = UNETR(spatial_dims=spatial_dims,
-                            in_channels=64,
-                            out_channels=64,
-                            feature_size=4,
-                            hidden_size=192,
-                            num_layers=6,
-                            patch_size=(16, 16, 16),
-                            img_size=get_scale_value(spatial_dims, input_patch_size, scales[:1]),
-                            add_last=add_last,
-                            # decoder_scale=(2, 2, 2, 1),
-                            )
+        self.stage2 = MambaND(spatial_dims=spatial_dims,
+                              in_channels=64,
+                              out_channels=64,
+                              feature_size=4,
+                              hidden_size=192,
+                              num_layers=6,
+                              patch_size=(16, 16, 16),
+                              img_size=get_scale_value(spatial_dims, input_patch_size, scales[:1]),
+                              # decoder_scale=(2, 2, 2, 1),
+                              )
         self.patch_merging2 = PatchMerging2D(spatial_dims, 64, scale=scales[1],
                                              output_features=128)  # in: 64, 112, 112 -> out: 128, 56, 56
 
-        self.stage3 = UNETR(spatial_dims=spatial_dims,
-                            in_channels=128,
-                            out_channels=128,
-                            feature_size=8,
-                            hidden_size=384,
-                            num_layers=5,
-                            patch_size=(8, 8, 8),
-                            img_size=get_scale_value(spatial_dims, input_patch_size, scales[:2]),
-                            add_last=add_last,
-                            decoder_scale=(2, 2, 2, 1),
-                            # encoder_layers=(2, 1, 0),
-                            )
+        self.stage3 = MambaND(spatial_dims=spatial_dims,
+                              in_channels=128,
+                              out_channels=128,
+                              feature_size=8,
+                              hidden_size=384,
+                              num_layers=5,
+                              patch_size=(8, 8, 8),
+                              img_size=get_scale_value(spatial_dims, input_patch_size, scales[:2]),
+                              decoder_scale=(2, 2, 2, 1),
+                              # encoder_layers=(2, 1, 0),
+                              )
         self.patch_merging3 = PatchMerging2D(spatial_dims, 128, scale=scales[2],
                                              output_features=256)  # in: 128, 56, 56 -> out: 256, 28, 28
 
-        self.stage4 = UNETR(spatial_dims=spatial_dims,
-                            in_channels=256,
-                            out_channels=256,
-                            feature_size=8,
-                            hidden_size=384,
-                            num_layers=4,
-                            patch_size=(4, 4, 4),
-                            img_size=get_scale_value(spatial_dims, input_patch_size, scales[:3]),
-                            encoder_layers=(1, 1, 0),
-                            decoder_scale=(2, 2, 1, 1),
-                            add_last=add_last,
-                            )
+        self.stage4 = MambaND(spatial_dims=spatial_dims,
+                              in_channels=256,
+                              out_channels=256,
+                              feature_size=8,
+                              hidden_size=384,
+                              num_layers=4,
+                              patch_size=(4, 4, 4),
+                              img_size=get_scale_value(spatial_dims, input_patch_size, scales[:3]),
+                              encoder_layers=(1, 1, 0),
+                              decoder_scale=(2, 2, 1, 1),
+                              )
         self.patch_merging4 = PatchMerging2D(spatial_dims, 256, scale=scales[3],
                                              output_features=512)  # in: 256, 28, 28 -> out: 512, 14, 14
 
-        self.stage5 = UNETR(spatial_dims=spatial_dims,
-                            in_channels=512,
-                            out_channels=512,
-                            feature_size=16,
-                            hidden_size=384,
-                            num_layers=4,
-                            patch_size=(2, 2, 2),
-                            encoder_layers=(0, 0, 0),
-                            decoder_scale=(2, 1, 1, 1),
-                            img_size=get_scale_value(spatial_dims, input_patch_size, scales[:4]),
-                            add_last=add_last,
-                            )
+        self.stage5 = MambaND(spatial_dims=spatial_dims,
+                              in_channels=512,
+                              out_channels=512,
+                              feature_size=16,
+                              hidden_size=384,
+                              num_layers=4,
+                              patch_size=(2, 2, 2),
+                              encoder_layers=(0, 0, 0),
+                              decoder_scale=(2, 1, 1, 1),
+                              img_size=get_scale_value(spatial_dims, input_patch_size, scales[:4])
+                              )
         self.patch_merging5 = PatchMerging2D(spatial_dims, 512,
                                              scale=(1, 1, 1),
                                              output_features=512)  # in: 256, 28, 28 -> out: 512, 14, 14
 
-        self.stage6 = UNETR(spatial_dims=spatial_dims,
-                            in_channels=512,
-                            out_channels=512,
-                            feature_size=16,
-                            hidden_size=384,
-                            num_layers=4,
-                            patch_size=(2, 2, 2),
-                            encoder_layers=(0, 0, 0),
-                            decoder_scale=(2, 1, 1, 1),
-                            img_size=get_scale_value(spatial_dims, input_patch_size, scales[:4]),
-                            add_last=add_last,
-                            )
+        self.stage6 = MambaND(spatial_dims=spatial_dims,
+                              in_channels=512,
+                              out_channels=512,
+                              feature_size=16,
+                              hidden_size=384,
+                              num_layers=4,
+                              patch_size=(2, 2, 2),
+                              encoder_layers=(0, 0, 0),
+                              decoder_scale=(2, 1, 1, 1),
+                              img_size=get_scale_value(spatial_dims, input_patch_size, scales[:4])
+                              )
         # spatial_dims, 512, 256, 512)  # in: 512, 7, 7 -> 512, 7, 7
 
         # decoder
@@ -1134,18 +1700,17 @@ class UNETR2Net(nn.Module):
             output_dim=512
         )  # 512, 14, 14 -> 512, 28, 28
         # -> concat -> 512, 28, 28
-        self.stage5d = UNETR(spatial_dims=spatial_dims,
-                             in_channels=1024,
-                             out_channels=512,
-                             feature_size=16,
-                             hidden_size=384,
-                             num_layers=4,
-                             patch_size=(2, 2, 2),
-                             encoder_layers=(0, 0, 0),
-                             decoder_scale=(2, 1, 1, 1),
-                             img_size=get_scale_value(spatial_dims, input_patch_size, scales[:4]),
-                             add_last=add_last,
-                             )
+        self.stage5d = MambaND(spatial_dims=spatial_dims,
+                               in_channels=1024,
+                               out_channels=512,
+                               feature_size=16,
+                               hidden_size=384,
+                               num_layers=4,
+                               patch_size=(2, 2, 2),
+                               encoder_layers=(0, 0, 0),
+                               decoder_scale=(2, 1, 1, 1),
+                               img_size=get_scale_value(spatial_dims, input_patch_size, scales[:4])
+                               )
         # spatial_dims, 1024, 256, 512)  # in: 1024, 14, 14 -> 512, 14, 14
 
         self.patch_expand4d = PatchExpand(
@@ -1159,18 +1724,17 @@ class UNETR2Net(nn.Module):
 
         self.concat_back_dim4d = nn.Linear(512, 256)
 
-        self.stage4d = UNETR(spatial_dims=spatial_dims,
-                             in_channels=256,
-                             out_channels=256,
-                             feature_size=8,
-                             hidden_size=384,
-                             num_layers=4,
-                             patch_size=(2, 2, 2),
-                             encoder_layers=(0, 0, 0),
-                             decoder_scale=(2, 1, 1, 1),
-                             img_size=get_scale_value(spatial_dims, input_patch_size, scales[:3]),
-                             add_last=add_last,
-                             )
+        self.stage4d = MambaND(spatial_dims=spatial_dims,
+                               in_channels=256,
+                               out_channels=256,
+                               feature_size=8,
+                               hidden_size=384,
+                               num_layers=4,
+                               patch_size=(2, 2, 2),
+                               encoder_layers=(0, 0, 0),
+                               decoder_scale=(2, 1, 1, 1),
+                               img_size=get_scale_value(spatial_dims, input_patch_size, scales[:3])
+                               )
         self.patch_expand3d = PatchExpand(
             spatial_dims=spatial_dims,
             dim=256,
@@ -1180,18 +1744,17 @@ class UNETR2Net(nn.Module):
         )  # 256, 28, 28 -> 128, 56, 56
         # concat -> 256, 56, 56
         self.concat_back_dim3d = nn.Linear(256, 128)  # 128 56 56
-        self.stage3d = UNETR(spatial_dims=spatial_dims,
-                             in_channels=128,
-                             out_channels=128,
-                             feature_size=4,
-                             hidden_size=384,
-                             num_layers=5,
-                             patch_size=(4, 4, 4),
-                             encoder_layers=(1, 1, 0),
-                             decoder_scale=(2, 2, 1, 1),
-                             img_size=get_scale_value(spatial_dims, input_patch_size, scales[:2]),
-                             add_last=add_last,
-                             )
+        self.stage3d = MambaND(spatial_dims=spatial_dims,
+                               in_channels=128,
+                               out_channels=128,
+                               feature_size=4,
+                               hidden_size=384,
+                               num_layers=5,
+                               patch_size=(4, 4, 4),
+                               encoder_layers=(1, 1, 0),
+                               decoder_scale=(2, 2, 1, 1),
+                               img_size=get_scale_value(spatial_dims, input_patch_size, scales[:2])
+                               )
         self.patch_expand2d = PatchExpand(
             spatial_dims=spatial_dims,
             dim=128,
@@ -1201,17 +1764,16 @@ class UNETR2Net(nn.Module):
         )  # 128, 56, 56 -> 64, 112, 112
         # concat -> 128, 112, 112
         self.concat_back_dim2d = nn.Linear(128, 64)  # 64, 112, 112
-        self.stage2d = UNETR(spatial_dims=spatial_dims,
-                             in_channels=64,
-                             out_channels=64,
-                             feature_size=4,
-                             hidden_size=192,
-                             num_layers=6,
-                             patch_size=(8, 8, 8),
-                             decoder_scale=(2, 2, 2, 1),
-                             img_size=get_scale_value(spatial_dims, input_patch_size, scales[:1]),
-                             add_last=add_last,
-                             )
+        self.stage2d = MambaND(spatial_dims=spatial_dims,
+                               in_channels=64,
+                               out_channels=64,
+                               feature_size=4,
+                               hidden_size=192,
+                               num_layers=6,
+                               patch_size=(8, 8, 8),
+                               decoder_scale=(2, 2, 2, 1),
+                               img_size=get_scale_value(spatial_dims, input_patch_size, scales[:1])
+                               )
         self.patch_expand1d = PatchExpand(
             spatial_dims=spatial_dims,
             dim=64,
@@ -1221,25 +1783,24 @@ class UNETR2Net(nn.Module):
         )  # 64, 112, 112 -> 32, 224, 224
         # concat -> 64, 224, 224
         self.concat_back_dim1d = nn.Linear(64, 32)  # 64, 112, 112
-        self.stage1d = UNETR(spatial_dims=spatial_dims,
-                             in_channels=32,
-                             out_channels=32,
-                             feature_size=4,
-                             hidden_size=96,
-                             num_layers=7,
-                             patch_size=(16, 16, 16),
-                             img_size=input_patch_size,
-                             add_last=add_last,
-                             )
+        self.stage1d = MambaND(spatial_dims=spatial_dims,
+                               in_channels=32,
+                               out_channels=32,
+                               feature_size=4,
+                               hidden_size=96,
+                               num_layers=7,
+                               patch_size=(16, 16, 16),
+                               img_size=input_patch_size
+                               )
 
-        self.side1 = Convolution(spatial_dims, 32, out_channels, kernel_size=1, padding=0, conv_only=True)
-        self.side2 = Convolution(spatial_dims, 64, out_channels, kernel_size=1, padding=0, conv_only=True)
-        self.side3 = Convolution(spatial_dims, 128, out_channels, kernel_size=1, padding=0, conv_only=True)
-        self.side4 = Convolution(spatial_dims, 256, out_channels, kernel_size=1, padding=0, conv_only=True)
-        self.side5 = Convolution(spatial_dims, 512, out_channels, kernel_size=1, padding=0, conv_only=True)
-        self.side6 = Convolution(spatial_dims, 512, out_channels, kernel_size=1, padding=0, conv_only=True)
+        self.side1 = Convolution(spatial_dims, 32, out_ch, kernel_size=1, padding=0, conv_only=True)
+        self.side2 = Convolution(spatial_dims, 64, out_ch, kernel_size=1, padding=0, conv_only=True)
+        self.side3 = Convolution(spatial_dims, 128, out_ch, kernel_size=1, padding=0, conv_only=True)
+        self.side4 = Convolution(spatial_dims, 256, out_ch, kernel_size=1, padding=0, conv_only=True)
+        self.side5 = Convolution(spatial_dims, 512, out_ch, kernel_size=1, padding=0, conv_only=True)
+        self.side6 = Convolution(spatial_dims, 512, out_ch, kernel_size=1, padding=0, conv_only=True)
 
-        self.outconv = Convolution(spatial_dims, 6 * out_channels, out_channels, kernel_size=1, conv_only=True)
+        self.outconv = Convolution(spatial_dims, 6 * out_ch, out_ch, kernel_size=1, conv_only=True)
 
     def forward(self, x):
         hx = x
@@ -1343,254 +1904,33 @@ class UNETR2Net(nn.Module):
                 param.requires_grad = True
 
 
-class UNETR(nn.Module):
-    """
-    UNETR based on: "Hatamizadeh et al.,
-    UNETR: Transformers for 3D Medical Image Segmentation <https://arxiv.org/abs/2103.10504>"
-    """
-
-    def __init__(
-            self,
-            spatial_dims: int,
-            in_channels: int,
-            out_channels: int,
-            img_size: Sequence[int] | int,
-            feature_size: int = 16,
-            hidden_size: int = 768,
-            mlp_dim: int = 3072,
-            num_heads: int = 12,
-            proj_type: str = "conv",
-            norm_name: tuple | str = "instance",
-            conv_block: bool = True,
-            res_block: bool = True,
-            dropout_rate: float = 0.0,
-
-            qkv_bias: bool = False,
-            save_attn: bool = False,
-            num_layers: int = 7,
-            patch_size: tuple[int, ...] = (16, 16, 16),
-            decoder_scale: tuple[int, ...] = (2, 2, 2, 2),
-            encoder_scale: tuple[int, ...] = (2, 2, 2),
-            encoder_layers: tuple[int, ...] = (2, 1, 0),
-            add_last: bool = True
-    ) -> None:
-        """
-        Args:
-            in_channels: dimension of input channels.
-            out_channels: dimension of output channels.
-            img_size: dimension of input image.
-            feature_size: dimension of network feature size. Defaults to 16.
-            hidden_size: dimension of hidden layer. Defaults to 768.
-            mlp_dim: dimension of feedforward layer. Defaults to 3072.
-            num_heads: number of attention heads. Defaults to 12.
-            proj_type: patch embedding layer type. Defaults to "conv".
-            norm_name: feature normalization type and arguments. Defaults to "instance".
-            conv_block: if convolutional block is used. Defaults to True.
-            res_block: if residual block is used. Defaults to True.
-            dropout_rate: fraction of the input units to drop. Defaults to 0.0.
-            spatial_dims: number of spatial dims. Defaults to 3.
-            qkv_bias: apply the bias term for the qkv linear layer in self attention block. Defaults to False.
-            save_attn: to make accessible the attention in self attention block. Defaults to False.
-        """
-
-        super().__init__()
-        self.add_last = add_last
-        if self.add_last:
-            self.rebnconvin = get_dwconv_layer(2, in_channels, out_channels)
-        if not (0 <= dropout_rate <= 1):
-            raise ValueError("dropout_rate should be between 0 and 1.")
-
-        if hidden_size % num_heads != 0:
-            raise ValueError("hidden_size should be divisible by num_heads.")
-        self.spatial_dims = spatial_dims
-        self.num_layers = num_layers
-        img_size = tuple(int(item) for item in ensure_tuple_rep(img_size, spatial_dims))
-        self.patch_size = patch_size[:spatial_dims]
-        # self.feat_size = tuple(img_d // p_d for img_d, p_d in zip(img_size, self.patch_size))
-        self.feat_size = self.get_feat_size(spatial_dims, img_size, patch_size)
-        self.hidden_size = hidden_size
-        self.classification = False
-        self.out_indices = [int(item) for item in np.linspace(2, num_layers - 1, 3)]
-        self.vit = ViT(
-            in_channels=in_channels,
-            img_size=img_size,
-            patch_size=self.patch_size,
-            hidden_size=hidden_size,
-            mlp_dim=mlp_dim,
-            num_layers=self.num_layers,
-            num_heads=num_heads,
-            proj_type=proj_type,
-            classification=self.classification,
-            dropout_rate=dropout_rate,
-            spatial_dims=spatial_dims,
-            qkv_bias=qkv_bias,
-            save_attn=save_attn,
-        )
-        self.encoder1 = UnetrBasicBlock(
-            spatial_dims=spatial_dims,
-            in_channels=in_channels,
-            out_channels=feature_size,
-            kernel_size=3,
-            stride=1,
-            norm_name=norm_name,
-            res_block=res_block,
-
-        )
-        self.encoder2 = UnetrPrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=hidden_size,
-            out_channels=feature_size * 2,
-            num_layer=encoder_layers[0],
-            kernel_size=3,
-            stride=1,
-            upsample_kernel_size=encoder_scale[2],
-            norm_name=norm_name,
-            conv_block=conv_block,
-            res_block=res_block,
-
-        )
-        self.encoder3 = UnetrPrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=hidden_size,
-            out_channels=feature_size * 4,
-            num_layer=encoder_layers[1],
-            kernel_size=3,
-            stride=1,
-            upsample_kernel_size=encoder_scale[1],
-            norm_name=norm_name,
-            conv_block=conv_block,
-            res_block=res_block,
-        )
-        self.encoder4 = UnetrPrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=hidden_size,
-            out_channels=feature_size * 8,
-            num_layer=encoder_layers[2],
-            kernel_size=3,
-            stride=1,
-            upsample_kernel_size=encoder_scale[0],
-            norm_name=norm_name,
-            conv_block=conv_block,
-            res_block=res_block,
-        )
-        self.decoder5 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=hidden_size,
-            out_channels=feature_size * 8,
-            kernel_size=3,
-            upsample_kernel_size=decoder_scale[0],
-            norm_name=norm_name,
-            res_block=res_block,
-        )
-        self.decoder4 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=feature_size * 8,
-            out_channels=feature_size * 4,
-            kernel_size=3,
-            upsample_kernel_size=decoder_scale[1],
-            norm_name=norm_name,
-            res_block=res_block,
-        )
-        self.decoder3 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=feature_size * 4,
-            out_channels=feature_size * 2,
-            kernel_size=3,
-            upsample_kernel_size=decoder_scale[2],
-            norm_name=norm_name,
-            res_block=res_block,
-        )
-        self.decoder2 = UnetrUpBlock(
-            spatial_dims=spatial_dims,
-            in_channels=feature_size * 2,
-            out_channels=feature_size,
-            kernel_size=3,
-            upsample_kernel_size=decoder_scale[3],
-            norm_name=norm_name,
-            res_block=res_block,
-        )
-        self.out = UnetOutBlock(spatial_dims=spatial_dims, in_channels=feature_size, out_channels=out_channels)
-        self.proj_axes = (0, spatial_dims + 1) + tuple(d + 1 for d in range(spatial_dims))
-        self.proj_view_shape = list(self.feat_size) + [self.hidden_size]
-
-    @staticmethod
-    def get_feat_size(spatial_dims: int, img_size, patch_size):
-        if spatial_dims == 3:
-            return (
-                int(img_size[0] // patch_size[0]),
-                int(img_size[1] // patch_size[1]),
-                int(img_size[2] // patch_size[2]),
-            )
-        elif spatial_dims == 2:
-            return (
-                int(img_size[0] // patch_size[0]),
-                int(img_size[1] // patch_size[1]),
-            )
-
-    @staticmethod
-    def proj_feat(spatial_dims: int, x, hidden_size, feat_size):
-        x = x.view(x.size(0), *feat_size, hidden_size)
-        x = permute(x, spatial_dims=spatial_dims, reverse=True).contiguous()
-        # x = x.permute(0, 4, 1, 2, 3).contiguous()
-        return x
-
-    # def proj_feat(self, x):
-    #     new_view = [x.size(0)] + self.proj_view_shape
-    #     x = x.view(new_view)
-    #     x = x.permute(self.proj_axes).contiguous()
-    #     return x
-
-    def forward(self, x_in):
-        if self.add_last:
-            last_add = self.rebnconvin(x_in)
-
-        x, hidden_states_out = self.vit(x_in)
-        enc1 = self.encoder1(x_in)
-        x2 = hidden_states_out[self.out_indices[0]]
-        enc2 = self.encoder2(self.proj_feat(self.spatial_dims, x2, self.hidden_size, self.feat_size))
-        x3 = hidden_states_out[self.out_indices[1]]
-        enc3 = self.encoder3(self.proj_feat(self.spatial_dims, x3, self.hidden_size, self.feat_size))
-        x4 = hidden_states_out[self.out_indices[2]]
-        enc4 = self.encoder4(self.proj_feat(self.spatial_dims, x4, self.hidden_size, self.feat_size))
-        dec4 = self.proj_feat(self.spatial_dims, x, self.hidden_size, self.feat_size)
-        dec3 = self.decoder5(dec4, enc4)
-        dec2 = self.decoder4(dec3, enc3)
-        dec1 = self.decoder3(dec2, enc2)
-        out = self.decoder2(dec1, enc1)
-        out = self.out(out)
-        if self.add_last:
-            out = out + last_add
-        return out
-
-
-def get_unetr2net_from_plans(
+def get_mamband2net_from_plans(
         plans_manager: PlansManager,
-        dataset_json: dict,
         configuration_manager: ConfigurationManager,
         num_input_channels: int,
+        num_output_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True,
         small_mode: bool = False
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
     if not small_mode:
-        model = UNETR2Net(
+        model = MambaND2Net(
             spatial_dims=len(configuration_manager.patch_size),
-            in_channels=num_input_channels,
-            out_channels=label_manager.num_segmentation_heads,
+            in_ch=num_input_channels,
+            out_ch=num_output_channels,
             deep_supervision=deep_supervision,
             input_patch_size=configuration_manager.patch_size
         )
 
     else:
         raise NotImplementedError()
-        # model = UNETR2NetP(
+        # model = MambaND2NetP(
         #     spatial_dims=len(configuration_manager.patch_size),
         #     factorization_type="cross-scan",
-        #     in_channels=num_input_channels,
-        #     out_channels=label_manager.num_segmentation_heads,
+        #     in_ch=num_input_channels,
+        #     out_ch=label_manager.num_segmentation_heads,
         #     deep_supervision=deep_supervision,
         #     input_patch_size=configuration_manager.patch_size
         # )
@@ -1606,10 +1946,10 @@ def get_unetr2net_from_plans(
 
 if __name__ == '__main__':
     # s = (4, 12, 12)
-    # model = UNETR(
+    # model = MambaND(
     #     spatial_dims=3,
-    #     in_channels=1,
-    #     out_channels=3,
+    #     in_ch=1,
+    #     out_ch=3,
     #     img_size=s,
     #     feature_size=4,
     #     hidden_size=96,
@@ -1630,17 +1970,17 @@ if __name__ == '__main__':
     #
     # print(summary(model, input_size=[1, 1, *s]))
 
-    in_channels = 1
-    out_channels = 1
+    in_ch = 1
+    out_ch = 1
     input_patch_size_ = [192, 192]
-    model = UNETR2Net(spatial_dims=len(input_patch_size_),
-                      # factorization_type="cross-scan",
-                      in_channels=in_channels,
-                      out_channels=out_channels,
-                      deep_supervision=True,
-                      input_patch_size=input_patch_size_).to("cuda")
-    output = model(torch.rand(size=(1, in_channels, *input_patch_size_)).to("cuda"))
+    model = MambaND2Net(spatial_dims=len(input_patch_size_),
+                        # factorization_type="cross-scan",
+                        in_ch=in_ch,
+                        out_ch=out_ch,
+                        deep_supervision=True,
+                        input_patch_size=input_patch_size_).to("cuda")
+    output = model(torch.rand(size=(1, in_ch, *input_patch_size_)).to("cuda"))
     for x in output:
         print(x.shape)
 
-    print(summary(model, input_size=[1, in_channels, *input_patch_size_]))
+    print(summary(model, input_size=[1, in_ch, *input_patch_size_]))

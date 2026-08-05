@@ -10,7 +10,7 @@
 # limitations under the License.
 from monai.networks.blocks import Convolution
 from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import init_last_bn_before_add_to_0
 from nnunetv2.utilities.network_initialization import InitWeights_He
 
 from mamba_ssm import Mamba
@@ -20,7 +20,7 @@ import torch
 
 from monai.networks.blocks.dynunet_block import UnetOutBlock
 from monai.networks.blocks.unetr_block import UnetrBasicBlock, UnetrUpBlock
-from nnunetv2.nets.seg_mamba.mamba_simple import Mamba
+from nnunetv2.nets.segmentation.seg_mamba.mamba_simple import Mamba
 import torch.nn.functional as F
 
 
@@ -373,21 +373,20 @@ class SegMamba(nn.Module):
 
 def get_seg_mamba_from_plans(
         plans_manager: PlansManager,
-        dataset_json: dict,
         configuration_manager: ConfigurationManager,
         num_input_channels: int,
+        num_output_channels: int,
         deep_supervision: bool = True,
         use_pretrain: bool = True,
         small_mode: bool = False
 ):
     # dim = len(configuration_manager.conv_kernel_sizes[0])
     # assert dim == 2, "Only 2D supported at the moment"
-    label_manager = plans_manager.get_label_manager(dataset_json)
     if not small_mode:
         model = SegMamba(
             spatial_dims=len(configuration_manager.patch_size),
             in_ch=num_input_channels,
-            out_ch=label_manager.num_segmentation_heads,
+            out_ch=num_output_channels,
             # input_patch_size=configuration_manager.patch_size
         )
 
