@@ -1,11 +1,6 @@
 from typing import Literal
 
-from dynamic_network_architectures.architectures.unet import PlainConvUNet, ResidualEncoderUNet
-from dynamic_network_architectures.building_blocks.helper import get_matching_instancenorm, convert_dim_to_conv_op
-from dynamic_network_architectures.initialization.weight_init import init_last_bn_before_add_to_0
-from nnunetv2.utilities.network_initialization import InitWeights_He
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
-from torch import nn
+from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
 
 import pydoc
 import warnings
@@ -92,7 +87,6 @@ if __name__ == "__main__":
     target = torch.rand(size=(8, 1, 256, 256))
     outputs = model(data) # this should be a list of torch.Tensor
     print("outputs: ", outputs.shape)
-    from deep_utils import JsonUtils
     from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
     plans_manager = PlansManager("/home/aicvi/projects/nnUNet_translation/nnunetv2/nnUNetResEncUNetLPlans.json")
     configuration_manager = plans_manager.get_configuration("3d_fullres")

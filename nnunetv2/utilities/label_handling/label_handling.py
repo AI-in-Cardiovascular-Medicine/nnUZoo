@@ -9,7 +9,7 @@ from batchgenerators.utilities.file_and_folder_operations import join
 import nnunetv2
 from nnunetv2.utilities.find_class_by_name import recursive_find_python_class
 from nnunetv2.utilities.helpers import softmax_helper_dim0
-from acvl_utils.cropping_and_padding.bounding_boxes import  insert_crop_into_image
+from acvl_utils.cropping_and_padding.bounding_boxes import insert_crop_into_image
 from typing import TYPE_CHECKING
 
 # see https://adamj.eu/tech/2021/05/13/python-type-hints-how-to-fix-circular-imports/
@@ -19,13 +19,15 @@ if TYPE_CHECKING:
 
 class LabelManager(object):
     def __init__(self, label_dict: dict, regions_class_order: Union[List[int], None], force_use_labels: bool = False,
-                 inference_nonlin=None, target_type:str = "segmentation"):
-        self._sanity_check(label_dict)
+                 inference_nonlin=None, target_type: str = "segmentation", channel_names: dict[str, int] = None):
+        if target_type not in ['ssl', 'classification', 'translation']:
+            self._sanity_check(label_dict)
         self.label_dict = label_dict
         self.regions_class_order = regions_class_order
         self._force_use_labels = force_use_labels
         self._num_segmentation_heads = None
         self.target_type = target_type
+        self.channel_names = channel_names
         if force_use_labels:
             self._has_regions = False
         else:
@@ -247,6 +249,8 @@ class LabelManager(object):
         else:
             if self.target_type == "translation":
                 return len(self.all_labels) - 1
+            elif self.target_type == "ssl":
+                return len(self.channel_names)  # TODO: in SSL we want the same number of channels
             else:
                 return len(self.all_labels)
 
@@ -310,7 +314,8 @@ def determine_num_input_channels(plans_manager: PlansManager,
         config_manager = configuration_or_config_manager
 
     label_manager = plans_manager.get_label_manager(dataset_json)
-    num_modalities = len(dataset_json['modality']) if 'modality' in dataset_json.keys() else len(dataset_json['channel_names'])
+    num_modalities = len(dataset_json['modality']) if 'modality' in dataset_json.keys() else len(
+        dataset_json['channel_names'])
 
     # cascade has different number of input channels
     if config_manager.previous_stage_name is not None:

@@ -19,7 +19,7 @@ from nnunetv2.utilities.label_handling.label_handling import get_labelmanager_cl
 
 # see https://adamj.eu/tech/2021/05/13/python-type-hints-how-to-fix-circular-imports/
 from typing import TYPE_CHECKING
-from dynamic_network_architectures.building_blocks.helper import convert_dim_to_conv_op, get_matching_instancenorm
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import convert_dim_to_conv_op, get_matching_instancenorm
 
 if TYPE_CHECKING:
     from nnunetv2.utilities.label_handling.label_handling import LabelManager
@@ -27,6 +27,51 @@ if TYPE_CHECKING:
     from nnunetv2.preprocessing.preprocessors.default_preprocessor import DefaultPreprocessor
     from nnunetv2.experiment_planning.experiment_planners.default_experiment_planner import ExperimentPlanner
 
+
+
+# nnUZoo used to build its networks from the external dynamic-network-architectures package. That code now
+# lives in nnunetv2/nets/dynamic_network_architectures/ (see its THIRD_PARTY_NOTICES.md), so plans.json files written before the
+# switch name modules that no longer exist. Translate them on read; the files themselves are left alone.
+#
+# Run nnUNetv2_migrate_plans to rewrite them for real. Once no legacy plans remain, this table can go.
+LEGACY_NETWORK_CLASS_NAMES = {
+    "dynamic_network_architectures.architectures.unet.PlainConvUNet":
+        "nnunetv2.nets.dynamic_network_architectures.unet.PlainConvUNet",
+    "dynamic_network_architectures.architectures.unet.ResidualEncoderUNet":
+        "nnunetv2.nets.dynamic_network_architectures.unet.ResidualEncoderUNet",
+    "dynamic_network_architectures.architectures.unet.ResidualUNet":
+        "nnunetv2.nets.dynamic_network_architectures.unet.ResidualUNet",
+    # never existed upstream, but old nnUZoo plans_handler emitted it
+    "dynamic_network_architectures.architectures.residual_unet.ResidualEncoderUNet":
+        "nnunetv2.nets.dynamic_network_architectures.unet.ResidualEncoderUNet",
+}
+
+_LEGACY_ALREADY_WARNED = set()
+
+
+def maybe_convert_legacy_network_class_name(network_class_name: str) -> str:
+    """
+    Map a pre-vendoring network_class_name onto its nnunetv2.nets equivalent.
+
+    Unknown dynamic_network_architectures.* paths raise instead of falling through, so a plans file we
+    did not anticipate fails here with a clear message rather than deep inside pydoc.locate.
+    """
+    if not network_class_name.startswith("dynamic_network_architectures."):
+        return network_class_name
+    if network_class_name not in LEGACY_NETWORK_CLASS_NAMES:
+        raise RuntimeError(
+            f"plans file requests '{network_class_name}', but nnUZoo no longer depends on "
+            f"dynamic-network-architectures and has no vendored equivalent registered for it. "
+            f"Known legacy names: {sorted(LEGACY_NETWORK_CLASS_NAMES)}. "
+            f"Either add it to LEGACY_NETWORK_CLASS_NAMES in nnunetv2/utilities/plans_handling/"
+            f"plans_handler.py, or re-run nnUNetv2_plan_experiment for this dataset."
+        )
+    new = LEGACY_NETWORK_CLASS_NAMES[network_class_name]
+    if network_class_name not in _LEGACY_ALREADY_WARNED:
+        _LEGACY_ALREADY_WARNED.add(network_class_name)
+        print(f"[nnUZoo] legacy plans entry remapped: {network_class_name} -> {new} "
+              f"(run nnUNetv2_migrate_plans to update the file)")
+    return new
 
 class ConfigurationManager(object):
     def __init__(self, configuration_dict: dict):
@@ -41,9 +86,9 @@ class ConfigurationManager(object):
             # try to build the architecture information from old plans, modify configuration dict to match new standard
             unet_class_name = self.configuration["UNet_class_name"]
             if unet_class_name == "PlainConvUNet":
-                network_class_name = "dynamic_network_architectures.architectures.unet.PlainConvUNet"
+                network_class_name = "nnunetv2.nets.dynamic_network_architectures.unet.PlainConvUNet"
             elif unet_class_name == 'ResidualEncoderUNet':
-                network_class_name = "dynamic_network_architectures.architectures.residual_unet.ResidualEncoderUNet"
+                network_class_name = "nnunetv2.nets.dynamic_network_architectures.unet.ResidualEncoderUNet"
             else:
                 raise RuntimeError(f'Unknown architecture {unet_class_name}. This conversion only supports '
                                    f'PlainConvUNet and ResidualEncoderUNet')
@@ -145,7 +190,8 @@ class ConfigurationManager(object):
 
     @property
     def network_arch_class_name(self) -> str:
-        return self.configuration['architecture']['network_class_name']
+        return maybe_convert_legacy_network_class_name(
+            self.configuration['architecture']['network_class_name'])
 
     @property
     def network_arch_init_kwargs(self) -> dict:
@@ -320,6 +366,7 @@ class PlansManager(object):
         return self.label_manager_class(label_dict=dataset_json['labels'],
                                         target_type=dataset_json.get("target_type", "segmentation"),
                                         regions_class_order=dataset_json.get('regions_class_order'),
+                                        channel_names = dataset_json["channel_names"],
                                         **kwargs)
 
     @property
