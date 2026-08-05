@@ -1,5 +1,13 @@
+from deep_utils import DirUtils
+import os
+from nnunetv2.paths import nnUNet_preprocessed, nnUNet_raw
+from nnunetv2.utilities.dataset_name_id_conversion import convert_id_to_dataset_name
+import shutil
+from os.path import join, exists, split
+from deep_utils import StringUtils
 from nnunetv2.configuration import default_num_processes
 from nnunetv2.experiment_planning.plan_and_preprocess_api import extract_fingerprints, plan_experiments, preprocess
+from deep_utils import JsonUtils
 
 
 def extract_fingerprint_entry():
@@ -23,8 +31,13 @@ def extract_fingerprint_entry():
     parser.add_argument('--verbose', required=False, action='store_true',
                         help='Set this to print a lot of stuff. Useful for debugging. Will disable progress bar! '
                              'Recommended for cluster environments')
+    parser.add_argument('--extract_input_image_statistics', required=False, action='store_true',
+                        help='Extract the input_image_statistics...')
+    parser.add_argument('--continue_', required=False, action='store_true',
+                        help='Extract the continue_...')
     args, unrecognized_args = parser.parse_known_args()
-    extract_fingerprints(args.d, args.fpe, args.np, args.verify_dataset_integrity, args.clean, args.verbose)
+    extract_fingerprints(args.d, args.fpe, args.np, args.verify_dataset_integrity, args.clean,
+                         args.verbose, args.continue_, args.extract_input_image_statistics)
 
 
 def plan_experiment_entry():
@@ -37,11 +50,12 @@ def plan_experiment_entry():
                         help='[OPTIONAL] Name of the Experiment Planner class that should be used. Default is '
                              '\'ExperimentPlanner\'. Note: There is no longer a distinction between 2d and 3d planner. '
                              'It\'s an all in one solution now. Wuch. Such amazing.')
-    parser.add_argument('-gpu_memory_target', default=8, type=float, required=False,
-                        help='[OPTIONAL] DANGER ZONE! Sets a custom GPU memory target. Default: 8 [GB]. Changing this will '
+    parser.add_argument('-gpu_memory_target', default=None, type=float, required=False,
+                        help='[OPTIONAL] DANGER ZONE! Sets a custom GPU memory target (in GB). Default: None (=Planner '
+                             'class default is used). Changing this will '
                              'affect patch and batch size and will '
                              'definitely affect your models performance! Only use this if you really know what you '
-                             'are doing and NEVER use this without running the default nnU-Net first (as a baseline).')
+                             'are doing and NEVER use this without running the default nnU-Net first as a baseline.')
     parser.add_argument('-preprocessor_name', default='DefaultPreprocessor', type=str, required=False,
                         help='[OPTIONAL] DANGER ZONE! Sets a custom preprocessor class. This class must be located in '
                              'nnunetv2.preprocessing. Default: \'DefaultPreprocessor\'. Changing this may affect your '
@@ -61,6 +75,7 @@ def plan_experiment_entry():
                              'differently named plans file such that the nnunet default plans are not '
                              'overwritten. You will then need to specify your custom plans file with -p whenever '
                              'running other nnunet commands (training, inference etc)')
+
     args, unrecognized_args = parser.parse_known_args()
     plan_experiments(args.d, args.pl, args.gpu_memory_target, args.preprocessor_name, args.overwrite_target_spacing,
                      args.overwrite_plans_name)
@@ -78,7 +93,7 @@ def preprocess_entry():
                         help='[OPTIONAL] Configurations for which the preprocessing should be run. Default: 2d 3d_fullres '
                              '3d_lowres. 3d_cascade_fullres does not need to be specified because it uses the data '
                              'from 3d_fullres. Configurations that do not exist for some dataset will be skipped.')
-    parser.add_argument('-np', type=int, nargs='+', default=[8, 4, 8], required=False,
+    parser.add_argument('-np', type=int, nargs='+', default=None, required=False,
                         help="[OPTIONAL] Use this to define how many processes are to be used. If this is just one number then "
                              "this number of processes is used for all configurations specified with -c. If it's a "
                              "list of numbers this list must have as many elements as there are configurations. We "
@@ -95,12 +110,8 @@ def preprocess_entry():
                              'Recommended for cluster environments')
     args, unrecognized_args = parser.parse_known_args()
     if args.np is None:
-        default_np = {
-            '2d': 4,
-            '3d_lowres': 8,
-            '3d_fullres': 4
-        }
-        np = {default_np[c] if c in default_np.keys() else 4 for c in args.c}
+        default_np = {"2d": 8, "3d_fullres": 4, "3d_lowres": 8}
+        np = [default_np[c] if c in default_np.keys() else 4 for c in args.c]
     else:
         np = args.np
     preprocess(args.d, args.plans_name, configurations=args.c, num_processes=np, verbose=args.verbose)
@@ -123,19 +134,22 @@ def plan_and_preprocess_entry():
     parser.add_argument('--no_pp', default=False, action='store_true', required=False,
                         help='[OPTIONAL] Set this to only run fingerprint extraction and experiment planning (no '
                              'preprocesing). Useful for debugging.')
-    parser.add_argument("--clean", required=False, default=False, action="store_true",
+    parser.add_argument("--clean_fp", required=False, default=False, action="store_true",
                         help='[OPTIONAL] Set this flag to overwrite existing fingerprints. If this flag is not set and a '
                              'fingerprint already exists, the fingerprint extractor will not run. REQUIRED IF YOU '
                              'CHANGE THE DATASET FINGERPRINT EXTRACTOR OR MAKE CHANGES TO THE DATASET!')
+    parser.add_argument("--clean_pf", required=False, default=False, action="store_true",
+                        help='[OPTIONAL] Set this flag to overwrite existing processed files')
     parser.add_argument('-pl', type=str, default='ExperimentPlanner', required=False,
                         help='[OPTIONAL] Name of the Experiment Planner class that should be used. Default is '
                              '\'ExperimentPlanner\'. Note: There is no longer a distinction between 2d and 3d planner. '
                              'It\'s an all in one solution now. Wuch. Such amazing.')
-    parser.add_argument('-gpu_memory_target', default=8, type=int, required=False,
-                        help='[OPTIONAL] DANGER ZONE! Sets a custom GPU memory target. Default: 8 [GB]. Changing this will '
+    parser.add_argument('-gpu_memory_target', default=None, type=float, required=False,
+                        help='[OPTIONAL] DANGER ZONE! Sets a custom GPU memory target (in GB). Default: None (=Planner '
+                             'class default is used). Changing this will '
                              'affect patch and batch size and will '
                              'definitely affect your models performance! Only use this if you really know what you '
-                             'are doing and NEVER use this without running the default nnU-Net first (as a baseline).')
+                             'are doing and NEVER use this without running the default nnU-Net first as a baseline.')
     parser.add_argument('-preprocessor_name', default='DefaultPreprocessor', type=str, required=False,
                         help='[OPTIONAL] DANGER ZONE! Sets a custom preprocessor class. This class must be located in '
                              'nnunetv2.preprocessing. Default: \'DefaultPreprocessor\'. Changing this may affect your '
@@ -149,7 +163,7 @@ def plan_and_preprocess_entry():
                              'know what you are doing and NEVER use this without running the default nnU-Net first '
                              '(as a baseline). Changing the target spacing for the other configurations is currently '
                              'not implemented. New target spacing must be a list of three numbers!')
-    parser.add_argument('-overwrite_plans_name', default='nnUNetPlans', required=False,
+    parser.add_argument('-overwrite_plans_name', default=None, required=False,
                         help='[OPTIONAL] uSE A CUSTOM PLANS IDENTIFIER. If you used -gpu_memory_target, '
                              '-preprocessor_name or '
                              '-overwrite_target_spacing it is best practice to use -overwrite_plans_name to generate a '
@@ -175,26 +189,114 @@ def plan_and_preprocess_entry():
     parser.add_argument('--verbose', required=False, action='store_true',
                         help='Set this to print a lot of stuff. Useful for debugging. Will disable progress bar! '
                              'Recommended for cluster environments')
+    
+    parser.add_argument('--clean_split', required=False, action='store_true',
+                        help='Remove final_split')
+    parser.add_argument('--use_nii',  action='store_true',
+                        help='Instead of creating npy use nii.gz directly')
+    parser.add_argument('--extract_input_image_statistics', required=False, action='store_true',
+                        help='Extract the input_image_statistics...')
+    parser.add_argument('--continue_', required=False, action='store_true',
+                        help='Extract the continue_...')
+    parser.add_argument('--continue_process', required=False, action='store_true',
+                        help='continue process')
+    parser.add_argument('--skip_fingerprint', required=False, action='store_true',
+                        help='skip_fingerprint')
+    parser.add_argument('--only_fingerprint', required=False, action='store_true',
+                        help='only_fingerprint')
+    parser.add_argument('--suppress_transpose', required=False, action='store_true',
+                        help='suppress_transpose, '
+                             'Mainly used when the z-spacing is not higher than other samples and at the same '
+                             'the order of the dimensions are correct!')
+    parser.add_argument('-keys_percent', type=float, help="What percentage of input data to take. Mainly for test")
+    parser.add_argument("-num_foreground_voxels_for_intensitystats", type=float, 
+                        help="Number of pixel values which are randomly extracted from whole the dataset. We don't extract all the data since it could become too large.", 
+                        default=10e7)
     args = parser.parse_args()
 
+    if args.clean_split:
+        for dataset_id in args.d:
+            dataset_name = convert_id_to_dataset_name(dataset_id)
+            splits_final = join(nnUNet_preprocessed, dataset_name, "splits_final.json")
+            if exists(splits_final):
+              os.remove(splits_final)
     # fingerprint extraction
-    print("Fingerprint extraction...")
-    extract_fingerprints(args.d, args.fpe, args.npfp, args.verify_dataset_integrity, args.clean, args.verbose)
-
+    if not args.skip_fingerprint:
+        print("Fingerprint extraction...")
+        extract_fingerprints(args.d, args.fpe, args.npfp, args.verify_dataset_integrity, args.clean_fp,
+                             args.verbose, args.continue_, args.extract_input_image_statistics, keys_percent=args.keys_percent,
+                             num_foreground_voxels_for_intensitystats=args.num_foreground_voxels_for_intensitystats)
+    else:
+        print("Skipped Fingerprint...")
+    if args.only_fingerprint:
+        print("Only Fingerprint is set to True exiting...")
+        return
     # experiment planning
+
     print('Experiment planning...')
-    plan_experiments(args.d, args.pl, args.gpu_memory_target, args.preprocessor_name, args.overwrite_target_spacing, args.overwrite_plans_name)
+    if args.overwrite_target_spacing and len(set(args.overwrite_target_spacing)) == 1 and "-1" in args.overwrite_target_spacing:
+        StringUtils.print("Skipping usual planner because target_spacing is set to -1")
+        plans_identifier = plan_experiments(args.d, args.pl, args.gpu_memory_target, args.preprocessor_name,
+                                        None, args.overwrite_plans_name,
+                                        suppress_transpose=args.suppress_transpose)
+       
+        
+        for dataset_id in args.d:
+            dataset_name = convert_id_to_dataset_name(dataset_id)
+            plans_path = join(nnUNet_preprocessed, dataset_name, plans_identifier + ".json")
+            plans_data = JsonUtils.load(plans_path)
+
+            for configuration, times in [("2d", 2), ("3d_fullres", 3), ("3d_lowres", 3)]:
+                if configuration in plans_data['configurations']:
+                    plans_data["configurations"][configuration]["spacing"] = [-1] * times
+            JsonUtils.dump(plans_path, plans_data)
+    else:
+        plans_identifier = plan_experiments(args.d, args.pl, args.gpu_memory_target, args.preprocessor_name,
+                                        args.overwrite_target_spacing, args.overwrite_plans_name,
+                                        suppress_transpose=args.suppress_transpose)
 
     # manage default np
     if args.np is None:
-        default_np = {"2d": 8, "3d_fullres": 4, "3d_lowres": 8}
+        default_np = {"2d": 8, "3d_fullres": 8, "3d_lowres": 8}
         np = [default_np[c] if c in default_np.keys() else 4 for c in args.c]
     else:
         np = args.np
     # preprocessing
+    if args.use_nii:
+        for dataset_id in args.d:
+            dataset_name = convert_id_to_dataset_name(dataset_id)
+            for train_c_type in args.c:
+               processed_files = join(nnUNet_preprocessed, dataset_name, f"nnUNetPlans_{train_c_type}")
+               if exists(processed_files):
+                    StringUtils.print(f"Removing the already processed files: {processed_files}")
+                    if os.path.islink(processed_files):
+                         os.unlink(processed_files)
+                    elif os.path.isdir(processed_files):
+                         shutil.rmtree(processed_files)
+                    elif os.path.exists(processed_files):
+                         os.remove(processed_files)
+               os.makedirs(processed_files, exist_ok=True)
+               raw = join(nnUNet_raw, dataset_name, f"imagesTr")
+               for filepath in DirUtils.list_dir_full_path(raw, endswith=".nii.gz"):
+                   pre_path = join(processed_files, split(filepath)[-1].replace("_0000.nii.gz", ".nii.gz"))
+                   os.system(f"ln -s {filepath} {pre_path}")
+        return
     if not args.no_pp:
         print('Preprocessing...')
-        preprocess(args.d, args.overwrite_plans_name, args.c, np, args.verbose)
+        if args.clean_pf:
+            for dataset_id in args.d:
+               dataset_name = convert_id_to_dataset_name(dataset_id)
+               for train_c_type in args.c:
+                    processed_files = join(nnUNet_preprocessed, dataset_name, f"nnUNetPlans_{train_c_type}")
+                    if exists(processed_files):
+                         StringUtils.print(f"Removing the already processed files: {processed_files}")
+                         if os.path.islink(processed_files):
+                              os.unlink(processed_files)
+                         elif os.path.isdir(processed_files):
+                              shutil.rmtree(processed_files)
+                         elif os.path.exists(processed_files):
+                              os.remove(processed_files)
+        preprocess(args.d, plans_identifier, args.c, np, args.verbose, args.continue_process)
 
 
 if __name__ == '__main__':

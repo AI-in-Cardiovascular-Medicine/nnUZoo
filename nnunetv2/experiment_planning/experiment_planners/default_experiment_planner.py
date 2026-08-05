@@ -1,12 +1,14 @@
 import shutil
+import inspect
 from copy import deepcopy
 from typing import List, Union, Tuple
 
 import numpy as np
 import torch
 from batchgenerators.utilities.file_and_folder_operations import load_json, join, save_json, isfile, maybe_mkdir_p
-from dynamic_network_architectures.architectures.unet import PlainConvUNet
-from dynamic_network_architectures.building_blocks.helper import convert_dim_to_conv_op, get_matching_instancenorm
+from deep_utils import StringUtils
+from nnunetv2.nets.dynamic_network_architectures.unet import PlainConvUNet
+from nnunetv2.nets.dynamic_network_architectures.network_blocks import convert_dim_to_conv_op, get_matching_instancenorm
 
 from nnunetv2.configuration import ANISO_THRESHOLD
 from nnunetv2.experiment_planning.experiment_planners.network_topology import get_pool_and_conv_props
@@ -206,7 +208,7 @@ class ExperimentPlanner(object):
             self.dataset_json['modality']
         normalization_schemes = [get_normalization_scheme(m) for m in modalities.values()]
         if self.dataset_fingerprint['median_relative_size_after_cropping'] < (3 / 4.):
-            use_nonzero_mask_for_norm = [i.leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true for i in
+            use_nonzero_mask_for_norm = [i.leaves_pixels_outside_mask_at_zero_if_use_mask_for_norm_is_true and self.dataset_json.get("target_type") in ["segmentation"] for i in
                                          normalization_schemes]
         else:
             use_nonzero_mask_for_norm = [False] * len(normalization_schemes)
@@ -226,6 +228,9 @@ class ExperimentPlanner(object):
         target_spacing = self.determine_fullres_target_spacing()
 
         max_spacing_axis = np.argmax(target_spacing)
+        if (target_spacing == target_spacing[max_spacing_axis]).sum() >1:
+            StringUtils.print(f"There are more than 1 spacing which is max: {target_spacing}, "
+                              f"You may wanna take a look!")
         remaining_axes = [i for i in list(range(3)) if i != max_spacing_axis]
         transpose_forward = [max_spacing_axis] + remaining_axes
         transpose_backward = [np.argwhere(np.array(transpose_forward) == i)[0][0] for i in range(3)]
@@ -299,10 +304,16 @@ class ExperimentPlanner(object):
                 'dropout_op_kwargs': None,
                 'nonlin': 'torch.nn.LeakyReLU',
                 'nonlin_kwargs': {'inplace': True},
-                "up_sample_type": self.up_sample_type,
             },
             '_kw_requires_import': ('conv_op', 'norm_op', 'dropout_op', 'nonlin'),
         }
+
+        # up_sample_type is not part of the stock architecture signature -- only some of the nets in
+        # nnunetv2/nets/ declare it. Emitting it unconditionally makes plan_experiment crash on the
+        # ones that don't (the vendored PlainConvUNet / ResidualEncoderUNet included), because the
+        # planner instantiates the network to estimate VRAM.
+        if 'up_sample_type' in inspect.signature(self.UNet_class.__init__).parameters:
+            architecture_kwargs['arch_kwargs']['up_sample_type'] = self.up_sample_type
 
         # now estimate vram consumption
         if _keygen(patch_size, pool_op_kernel_sizes) in _cache.keys():

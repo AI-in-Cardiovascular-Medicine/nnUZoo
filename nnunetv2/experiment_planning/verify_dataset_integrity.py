@@ -13,21 +13,18 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 import multiprocessing
-import re
-import time
-from multiprocessing import Pool
+from os.path import split
 from typing import Type
 
 import numpy as np
 import pandas as pd
 from batchgenerators.utilities.file_and_folder_operations import *
-
+from deep_utils import StringUtils, DirUtils
 from nnunetv2.imageio.base_reader_writer import BaseReaderWriter
 from nnunetv2.imageio.reader_writer_registry import determine_reader_writer_from_dataset_json
 from nnunetv2.paths import nnUNet_raw
 from nnunetv2.utilities.label_handling.label_handling import LabelManager
-from nnunetv2.utilities.utils import get_identifiers_from_split_dataset_folder, \
-    get_filenames_of_train_images_and_targets
+from nnunetv2.utilities.utils import get_filenames_of_train_images_and_targets
 
 
 def verify_labels(label_file: str, readerclass: Type[BaseReaderWriter], expected_labels: List[int]) -> bool:
@@ -50,68 +47,87 @@ def check_cases(image_files: List[str], label_file: str, expected_num_channels: 
     rw = readerclass()
     ret = True
     images, properties_image = rw.read_images(image_files)
-    segmentation, properties_seg = rw.read_seg(label_file)
+    segmentation, properties_seg = rw.read_seg(label_file) if label_file is not None else (None, None)
 
     # check for nans
     if np.any(np.isnan(images)):
-        print(f'Images contain NaN pixel values. You need to fix that by '
-              f'replacing NaN values with something that makes sense for your images!\nImages:\n{image_files}')
+        StringUtils.print(f'Images contain NaN pixel values. You need to fix that by '
+                          f'replacing NaN values with something that makes sense for your images!\nImages:\n{image_files}')
         ret = False
-    if np.any(np.isnan(segmentation)):
-        print(f'Segmentation contains NaN pixel values. You need to fix that.\nSegmentation:\n{label_file}')
-        ret = False
+    if segmentation is not None:
+        if np.any(np.isnan(segmentation)):
+            StringUtils.print(
+                f'Segmentation contains NaN pixel values. You need to fix that.\nSegmentation:\n{label_file}')
+            ret = False
 
     # check shapes
     shape_image = images.shape[1:]
-    shape_seg = segmentation.shape[1:]
-    if shape_image != shape_seg:
-        print('Error: Shape mismatch between segmentation and corresponding images. \nShape images: %s. '
-              '\nShape seg: %s. \nImage files: %s. \nSeg file: %s\n' %
-              (shape_image, shape_seg, image_files, label_file))
-        ret = False
+    if segmentation is not None:
+
+        shape_seg = segmentation.shape[1:]
+        if shape_image != shape_seg:
+            StringUtils.print(
+                'Error: Shape mismatch between segmentation and corresponding images. \nShape images: %s. '
+                '\nShape seg: %s. \nImage files: %s. \nSeg file: %s\n' %
+                (shape_image, shape_seg, image_files, label_file))
+            ret = False
+    else:
+        ret = True
 
     # check spacings
     spacing_images = properties_image['spacing']
-    spacing_seg = properties_seg['spacing']
-    if not np.allclose(spacing_seg, spacing_images):
-        print('Error: Spacing mismatch between segmentation and corresponding images. \nSpacing images: %s. '
-              '\nSpacing seg: %s. \nImage files: %s. \nSeg file: %s\n' %
-              (spacing_images, spacing_seg, image_files, label_file))
-        ret = False
+    if segmentation is not None:
+        spacing_seg = properties_seg['spacing']
+        if not np.allclose(spacing_seg, spacing_images):
+            StringUtils.print(
+                'Error: Spacing mismatch between segmentation and corresponding images. \nSpacing images: %s. '
+                '\nSpacing seg: %s. \nImage files: %s. \nSeg file: %s\n' %
+                (spacing_images, spacing_seg, image_files, label_file))
+            ret = False
+    else:
+        ret = True
 
     # check modalities
     if not len(images) == expected_num_channels:
-        print('Error: Unexpected number of modalities. \nExpected: %d. \nGot: %d. \nImages: %s\n'
-              % (expected_num_channels, len(images), image_files))
+        directory_path = split(image_files[0])[0]
+        StringUtils.print('Error: Unexpected number of modalities. \nExpected: %d. \nGot: %d. \nImages: %s\n'
+                          % (expected_num_channels, len(images), image_files))
+        DirUtils.write_txt(directory_path + "_image_issues.txt", [" -- ".join(image_files)], mode="a")
         ret = False
 
     # nibabel checks
     if 'nibabel_stuff' in properties_image.keys():
         # this image was read with NibabelIO
         affine_image = properties_image['nibabel_stuff']['original_affine']
-        affine_seg = properties_seg['nibabel_stuff']['original_affine']
-        if not np.allclose(affine_image, affine_seg):
-            print('WARNING: Affine is not the same for image and seg! \nAffine image: %s \nAffine seg: %s\n'
-                  'Image files: %s. \nSeg file: %s.\nThis can be a problem but doesn\'t have to be. Please run '
-                  'nnUNetv2_plot_overlay_pngs to verify if everything is OK!\n'
-                  % (affine_image, affine_seg, image_files, label_file))
+        if segmentation is not None:
+            affine_seg = properties_seg['nibabel_stuff']['original_affine']
+            if not np.allclose(affine_image, affine_seg):
+                StringUtils.print(
+                    'WARNING: Affine is not the same for image and seg! \nAffine image: %s \nAffine seg: %s\n'
+                    'Image files: %s. \nSeg file: %s.\nThis can be a problem but doesn\'t have to be. Please run '
+                    'nnUNetv2_plot_overlay_pngs to verify if everything is OK!\n'
+                    % (affine_image, affine_seg, image_files, label_file), color="yellow")
 
     # sitk checks
     if 'sitk_stuff' in properties_image.keys():
         # this image was read with SimpleITKIO
         # spacing has already been checked, only check direction and origin
         origin_image = properties_image['sitk_stuff']['origin']
-        origin_seg = properties_seg['sitk_stuff']['origin']
-        if not np.allclose(origin_image, origin_seg):
-            print('Warning: Origin mismatch between segmentation and corresponding images. \nOrigin images: %s. '
-                  '\nOrigin seg: %s. \nImage files: %s. \nSeg file: %s\n' %
-                  (origin_image, origin_seg, image_files, label_file))
+        if segmentation is not None:
+            origin_seg = properties_seg['sitk_stuff']['origin']
+            if not np.allclose(origin_image, origin_seg):
+                StringUtils.print(
+                    'Warning: Origin mismatch between segmentation and corresponding images. \nOrigin images: %s. '
+                    '\nOrigin seg: %s. \nImage files: %s. \nSeg file: %s\n' %
+                    (origin_image, origin_seg, image_files, label_file), color="yellow")
         direction_image = properties_image['sitk_stuff']['direction']
-        direction_seg = properties_seg['sitk_stuff']['direction']
-        if not np.allclose(direction_image, direction_seg):
-            print('Warning: Direction mismatch between segmentation and corresponding images. \nDirection images: %s. '
-                  '\nDirection seg: %s. \nImage files: %s. \nSeg file: %s\n' %
-                  (direction_image, direction_seg, image_files, label_file))
+        if segmentation is not None:
+            direction_seg = properties_seg['sitk_stuff']['direction']
+            if not np.allclose(direction_image, direction_seg):
+                StringUtils.print(
+                    'Warning: Direction mismatch between segmentation and corresponding images. \nDirection images: %s. '
+                    '\nDirection seg: %s. \nImage files: %s. \nSeg file: %s\n' %
+                    (direction_image, direction_seg, image_files, label_file), color="yellow")
 
     return ret
 
@@ -128,11 +144,13 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
     print(f"[INFO] Starting to verify_dataset_integrity on {folder} with {num_processes} processors")
     assert isfile(join(folder, "dataset.json")), f"There needs to be a dataset.json file in folder, folder={folder}"
     dataset_json = load_json(join(folder, "dataset.json"))
-
+    target_type = dataset_json.get('target_type', "segmentation")
     if not 'dataset' in dataset_json.keys():
         assert isdir(join(folder, "imagesTr")), f"There needs to be a imagesTr subfolder in folder, folder={folder}"
-        assert isdir(join(folder, "labelsTr")), f"There needs to be a labelsTr subfolder in folder, folder={folder}"
-
+        if target_type not in ['ssl', 'classification']:
+            assert isdir(join(folder, "labelsTr")), f"There needs to be a labelsTr subfolder in folder, folder={folder}"
+        else:
+            print("INFO: target_type is set to ssl skipping label_check")
     # make sure all required keys are there
     dataset_keys = list(dataset_json.keys())
     required_keys = ['labels', "channel_names", "numTraining", "file_ending"]
@@ -154,9 +172,9 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
 
     # check if the right number of training cases is present
     assert len(dataset) == expected_num_training, 'Did not find the expected number of training cases ' \
-                                                               '(%d). Found %d instead.\nExamples: %s' % \
-                                                               (expected_num_training, len(dataset),
-                                                                list(dataset.keys())[:5])
+                                                  '(%d). Found %d instead.\nExamples: %s' % \
+                                                  (expected_num_training, len(dataset),
+                                                   list(dataset.keys())[:5])
 
     # check if corresponding labels are present
     if 'dataset' in dataset_json.keys():
@@ -177,41 +195,51 @@ def verify_dataset_integrity(folder: str, num_processes: int = 8) -> None:
                                     f"in the dataset.json. Or use imagesTr & labelsTr folders!\nMissing images:"
                                     f"\n{missing_images}\n\nMissing labels:\n{missing_labels}")
     else:
-        # old code that uses imagestr and labelstr folders
-        labelfiles = subfiles(join(folder, 'labelsTr'), suffix=file_ending, join=False)
-        label_identifiers = [i[:-len(file_ending)] for i in labelfiles]
-        # from deep_utils import DirUtils
-        # label_identifiers = [item[:-len(file_ending)] for item in DirUtils.list_dir_full_path(join(folder, "labelsTr"), get_full_path=False)]
-        labels_present = [i in label_identifiers for i in dataset.keys()]
-        missing = [i for j, i in enumerate(dataset.keys()) if not labels_present[j]]
-        assert all(labels_present), f'not all training cases have a label file in labelsTr. Fix that. Missing: {missing}'
+        if target_type not in ['ssl', 'classification']:
+            # old code that uses imagestr and labelstr folders
+            labelfiles = subfiles(join(folder, 'labelsTr'), suffix=file_ending, join=False)
+            label_identifiers = [i[:-len(file_ending)] for i in labelfiles]
+            # from deep_utils import DirUtils
+            # label_identifiers = [item[:-len(file_ending)] for item in DirUtils.list_dir_full_path(join(folder, "labelsTr"), get_full_path=False)]
+            labels_present = [i in label_identifiers for i in dataset.keys()]
+            missing = [i for j, i in enumerate(dataset.keys()) if not labels_present[j]]
+            assert all(
+                labels_present), f'not all training cases have a label file in labelsTr. Fix that. Missing: {missing}'
 
-    labelfiles = [v['label'] for v in dataset.values()]
     image_files = [v['images'] for v in dataset.values()]
 
-    # no plans exist yet, so we can't use PlansManager and gotta roll with the default. It's unlikely to cause
-    # problems anyway
-    label_manager = LabelManager(dataset_json['labels'], regions_class_order=dataset_json.get('regions_class_order'))
-    expected_labels = label_manager.all_labels
-    if label_manager.has_ignore_label:
-        expected_labels.append(label_manager.ignore_label)
-    labels_valid_consecutive = np.ediff1d(expected_labels) == 1
-    assert all(
-        labels_valid_consecutive), f'Labels must be in consecutive order (0, 1, 2, ...). The labels {np.array(expected_labels)[1:][~labels_valid_consecutive]} do not satisfy this restriction'
+    if target_type not in ['ssl', 'classification']:
+        labelfiles = [v['label'] for v in dataset.values()]
 
+        # no plans exist yet, so we can't use PlansManager and gotta roll with the default. It's unlikely to cause
+        # problems anyway
+        label_manager = LabelManager(dataset_json['labels'],
+                                     target_type=dataset_json.get('target_type'),
+                                     regions_class_order=dataset_json.get('regions_class_order'))
+        expected_labels = label_manager.all_labels
+        if label_manager.has_ignore_label:
+            expected_labels.append(label_manager.ignore_label)
+        labels_valid_consecutive = np.ediff1d(expected_labels) == 1
+        assert all(
+            labels_valid_consecutive), f'Labels must be in consecutive order (0, 1, 2, ...). The labels {np.array(expected_labels)[1:][~labels_valid_consecutive]} do not satisfy this restriction'
+    else:
+        labelfiles = [None] * len(image_files)
     # determine reader/writer class
-    reader_writer_class = determine_reader_writer_from_dataset_json(dataset_json, dataset[dataset.keys().__iter__().__next__()]['images'][0])
+    reader_writer_class = determine_reader_writer_from_dataset_json(dataset_json,
+                                                                    dataset[dataset.keys().__iter__().__next__()][
+                                                                        'images'][0])
 
     # check whether only the desired labels are present
     with multiprocessing.get_context("spawn").Pool(num_processes) as p:
-        print("[INFO] Verifying labels")
-        result = p.starmap(
-            verify_labels,
-            zip(labelfiles, [reader_writer_class] * len(labelfiles), [expected_labels] * len(labelfiles))
-        )
-        if not all(result):
-            raise RuntimeError(
-                'Some segmentation images contained unexpected labels. Please check text output above to see which one(s).')
+        if target_type not in ['ssl', 'classification']:
+            print("[INFO] Verifying labels")
+            result = p.starmap(
+                verify_labels,
+                zip(labelfiles, [reader_writer_class] * len(labelfiles), [expected_labels] * len(labelfiles))
+            )
+            if not all(result):
+                raise RuntimeError(
+                    'Some segmentation images contained unexpected labels. Please check text output above to see which one(s).')
 
         print("[INFO] Verifying cases")
         # check whether shapes and spacings match between images and labels
