@@ -509,6 +509,7 @@ class U2NETP(nn.Module):
         self.stage2d = RSU6(spatial_dims, 128, 16,  output_features[3])
         self.stage1d = RSU7(spatial_dims, 128, 16,  output_features[4])
 
+        # TODO: Add conv_only=True
         self.side1 = Convolution(spatial_dims, output_features[0], out_ch, kernel_size=3, padding=1)
         self.side2 = Convolution(spatial_dims, output_features[1], out_ch, kernel_size=3, padding=1)
         self.side3 = Convolution(spatial_dims, output_features[2], out_ch, kernel_size=3, padding=1)
