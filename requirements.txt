@@ -1,3 +1,0 @@
-torchinfo==1.8.0
-timm==0.6.13
-prettytable==3.12.0
