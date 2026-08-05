@@ -6,7 +6,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 
-class nnUNetLogger(object):
+class nnUNetLogger:
     """
     This class is really trivial. Don't expect cool functionality here. This is my makeshift solution to problems
     arising from out-of-sync epoch numbers and numbers of logged loss values. It also simplifies the trainer class a
@@ -15,18 +15,36 @@ class nnUNetLogger(object):
     YOU MUST LOG EXACTLY ONE VALUE PER EPOCH FOR EACH OF THE LOGGING ITEMS! DONT FUCK IT UP
     """
 
-    def __init__(self, verbose: bool = False):
-        self.my_fantastic_logging = {
-            'mean_fg_dice': list(),
-            'ema_fg_dice': list(),
-            'dice_per_class_or_region': list(),
-            'train_losses': list(),
-            'val_losses': list(),
-            'lrs': list(),
-            'epoch_start_timestamps': list(),
-            'epoch_end_timestamps': list()
+    def __init__(self, verbose: bool = False, target_type="segmentation"):
+        if target_type in ["segmentation", "translation", "ssl"]:
+            self.my_fantastic_logging = {
+                'mean_fg_dice': list(),
+                'ema_fg_dice': list(),
+                'dice_per_class_or_region': list(),
+                'train_losses': list(),
+                'val_losses': list(),
+                'lrs': list(),
+                'epoch_start_timestamps': list(),
+                'epoch_end_timestamps': list(),
+            }
+        elif target_type in ['classification']:
+            self.my_fantastic_logging = {
+                'train_losses': list(),
+                'val_losses': list(),
+                'lrs': list(),
+                'epoch_start_timestamps': list(),
+                'epoch_end_timestamps': list(),
+                "recall": list(),
+                "f1_score": list(),
+                "roc_auc": list(),
+                "accuracy": list(),
+                "precision": list(),
+                "y_pred_true_unique": list(),
         }
+        else:
+            raise ValueError("target not supported")
         self.verbose = verbose
+        self.target_type=target_type
         # shut up, this logging is great
 
     def log(self, key, value, epoch: int):
@@ -54,7 +72,7 @@ class nnUNetLogger(object):
 
     def plot_progress_png(self, output_folder):
         # we infer the epoch form our internal logging
-        if self.my_fantastic_logging['mean_fg_dice'] and self.my_fantastic_logging['ema_fg_dice']:
+        if ('mean_fg_dice' in self.my_fantastic_logging and self.my_fantastic_logging['mean_fg_dice'] and self.my_fantastic_logging['ema_fg_dice']) or ("precision" in self.my_fantastic_logging and  self.my_fantastic_logging['precision']) :
             epoch = min([len(i) for i in self.my_fantastic_logging.values()]) - 1  # lists of epoch 0 have len 1
         else:
             epoch = len(self.my_fantastic_logging['train_losses']) -1
@@ -62,7 +80,6 @@ class nnUNetLogger(object):
         fig, ax_all = plt.subplots(3, 1, figsize=(30, 54))
         # regular progress.png as we are used to from previous nnU-Net versions
         ax = ax_all[0]
-        ax2 = ax.twinx()
         x_values = list(range(epoch + 1))
         train_loss_values = self.my_fantastic_logging['train_losses'][:epoch + 1]
         ax.plot(x_values[:len(train_loss_values)], train_loss_values , color='b', ls='-', label="loss_tr",
@@ -70,15 +87,31 @@ class nnUNetLogger(object):
         val_loss_values = self.my_fantastic_logging['val_losses'][:epoch + 1]
         ax.plot(x_values[:len(val_loss_values)], val_loss_values, color='r', ls='-', label="loss_val",
                 linewidth=4)
-        if self.my_fantastic_logging['mean_fg_dice']  and self.my_fantastic_logging['ema_fg_dice']:
-            ax2.plot(x_values, self.my_fantastic_logging['mean_fg_dice'][:epoch + 1], color='g', ls='dotted',
-                     label="pseudo dice",
-                     linewidth=3)
-            ax2.plot(x_values, self.my_fantastic_logging['ema_fg_dice'][:epoch + 1], color='g', ls='-',
-                     label="pseudo dice (mov. avg.)",
-                     linewidth=4)
-            ax2.set_ylabel("pseudo dice")
-            ax2.legend(loc=(0.2, 1))
+        if self.target_type in ['segmentation']:
+            ax2 = ax.twinx()
+            if self.my_fantastic_logging['mean_fg_dice']  and self.my_fantastic_logging['ema_fg_dice']:
+                ax2.plot(x_values, self.my_fantastic_logging['mean_fg_dice'][:epoch + 1], color='g', ls='dotted',
+                         label="pseudo dice",
+                         linewidth=3)
+                ax2.plot(x_values, self.my_fantastic_logging['ema_fg_dice'][:epoch + 1], color='g', ls='-',
+                         label="pseudo dice (mov. avg.)",
+                         linewidth=4)
+                ax2.set_ylabel("pseudo dice")
+                ax2.legend(loc=(0.2, 1))
+        elif self.target_type in ['classification']:
+            ax2 = ax.twinx()
+            if self.my_fantastic_logging['f1_score'] and self.my_fantastic_logging['f1_score']:
+                ax2.plot(x_values, self.my_fantastic_logging['f1_score'][:epoch + 1], color='g', ls='dotted',
+                         label="f1_score",
+                         linewidth=3)
+                ax2.plot(x_values, self.my_fantastic_logging['recall'][:epoch + 1], color='y', ls='-',
+                         label="recall",
+                         linewidth=4)
+                ax2.plot(x_values, self.my_fantastic_logging['roc_auc'][:epoch + 1], color='y', ls='-',
+                         label="roc_auc",
+                         linewidth=4)
+                ax2.set_ylabel("scores")
+                ax2.legend(loc=(0.2, 1))
 
         ax.set_xlabel("epoch")
         ax.set_ylabel("loss")

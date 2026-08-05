@@ -1,4 +1,4 @@
-from __future__ import annotations
+from deep_utils import StringUtils
 import multiprocessing
 import os
 from typing import List
@@ -93,37 +93,41 @@ def _convert_to_npy(npz_file: str, unpack_segmentation: bool = True, overwrite_e
     data_npy = npz_file[:-3] + "npy"
     seg_npy = npz_file[:-4] + "_seg.npy"
     try:
-        npz_content = None  # will only be opened on demand
+        try:
+            npz_content = None  # will only be opened on demand
 
-        if overwrite_existing or not isfile(data_npy):
-            try:
-                npz_content = np.load(npz_file) if npz_content is None else npz_content
-            except Exception as e:
-                print(f"Unable to open preprocessed file {npz_file}. Rerun nnUNetv2_preprocess!")
-                raise e
-            np.save(data_npy, npz_content['data'])
+            if overwrite_existing or not isfile(data_npy):
+                try:
+                    npz_content = np.load(npz_file) if npz_content is None else npz_content
+                except Exception as e:
+                    print(f"Unable to open preprocessed file {npz_file}. Rerun nnUNetv2_preprocess!")
+                    raise e
+                np.save(data_npy, npz_content['data'])
 
-        if unpack_segmentation and (overwrite_existing or not isfile(seg_npy)):
-            try:
-                npz_content = np.load(npz_file) if npz_content is None else npz_content
-            except Exception as e:
-                print(f"Unable to open preprocessed file {npz_file}. Rerun nnUNetv2_preprocess!")
-                raise e
-            np.save(npz_file[:-4] + "_seg.npy", npz_content['seg'])
+            if unpack_segmentation and (overwrite_existing or not isfile(seg_npy)):
+                try:
+                    npz_content = np.load(npz_file) if npz_content is None else npz_content
+                except Exception as e:
+                    print(f"Unable to open preprocessed file {npz_file}. Rerun nnUNetv2_preprocess!")
+                    raise e
+                np.save(npz_file[:-4] + "_seg.npy", npz_content['seg'])
 
-        if verify_npy:
-            try:
-                np.load(data_npy, mmap_mode='r')
-                if isfile(seg_npy):
-                    np.load(seg_npy, mmap_mode='r')
-            except ValueError:
-                os.remove(data_npy)
-                os.remove(seg_npy)
-                print(f"Error when checking {data_npy} and {seg_npy}, fixing...")
-                if fail_ctr < 2:
-                    _convert_to_npy(npz_file, unpack_segmentation, overwrite_existing, verify_npy, fail_ctr+1)
-                else:
-                    raise RuntimeError("Unable to fix unpacking. Please check your system or rerun nnUNetv2_preprocess")
+            if verify_npy:
+                try:
+                    np.load(data_npy, mmap_mode='r')
+                    if isfile(seg_npy):
+                        np.load(seg_npy, mmap_mode='r')
+                except ValueError:
+                    os.remove(data_npy)
+                    os.remove(seg_npy)
+                    StringUtils.print(f"Error when checking {data_npy} and {seg_npy}, fixing...")
+                    if fail_ctr < 2:
+                        _convert_to_npy(npz_file, unpack_segmentation, overwrite_existing, verify_npy, fail_ctr+1)
+                    else:
+                        raise RuntimeError("Unable to fix unpacking. Please check your system or rerun nnUNetv2_preprocess")
+        except Exception as e:
+            StringUtils.print(f"Error in {e} for file: {npz_file}")
+            raise e
 
     except KeyboardInterrupt:
         if isfile(data_npy):

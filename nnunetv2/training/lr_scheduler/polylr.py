@@ -13,7 +13,7 @@ class PolyLRScheduler(_LRScheduler):
         self.exponent = exponent
         self.verbose = verbose
         self.ctr = 0
-        super().__init__(optimizer, current_step if current_step is not None else -1, False)
+        super().__init__(optimizer, current_step if current_step is not None else -1)
 
     def step(self, current_step=None):
         if current_step is None or current_step == -1:
@@ -21,6 +21,91 @@ class PolyLRScheduler(_LRScheduler):
             self.ctr += 1
 
         new_lr = self.initial_lr * (1 - current_step / self.max_steps) ** self.exponent
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = new_lr
+        return new_lr
+
+class PolyLRSchedulerTwoStage(_LRScheduler):
+    def __init__(self, optimizer, initial_lr: float, max_steps: int, transition_step: int, transition_lr: float,
+                 exponent: float = 0.9, current_step: int = None, verbose: bool = True):
+        self.optimizer = optimizer
+        self.initial_lr = initial_lr
+        self.max_steps = max_steps
+        self.transition_step = transition_step
+        self.transition_lr = transition_lr
+        self.exponent = exponent
+        self.verbose = verbose
+        self.ctr = 0
+        super().__init__(optimizer, current_step if current_step is not None else -1)
+
+    def step(self, current_step=None):
+        if current_step is None or current_step == -1:
+            current_step = self.ctr
+            self.ctr += 1
+
+        if current_step < self.transition_step:
+            new_lr = self.initial_lr * (1 - current_step / self.max_steps) ** self.exponent
+        else:
+            decay_steps = self.max_steps - self.transition_step
+            adjusted_step = current_step - self.transition_step
+            new_lr = self.transition_lr * (1 - adjusted_step / decay_steps) ** self.exponent
+
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = new_lr
+        return new_lr
+
+class CosineAnnealingLRScheduler(_LRScheduler):
+    def __init__(self, optimizer, initial_lr: float, max_steps: int, eta_min: float = 0.0, current_step: int = None,
+                 verbose: bool = True):
+        self.optimizer = optimizer
+        self.initial_lr = initial_lr
+        self.max_steps = max_steps
+        self.eta_min = eta_min
+        self.verbose = verbose
+        self.ctr = 0
+        super().__init__(optimizer, current_step if current_step is not None else -1)
+
+    def step(self, current_step=None):
+        if current_step is None or current_step == -1:
+            current_step = self.ctr
+            self.ctr += 1
+
+        new_lr = self.eta_min + (self.initial_lr - self.eta_min) * (
+            1 + math.cos(math.pi * current_step / self.max_steps)
+        ) / 2
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = new_lr
+        return new_lr
+
+class CosineAnnealingLRSchedulerTwoStage(_LRScheduler):
+    def __init__(self, optimizer, initial_lr: float, max_steps: int, transition_step: int, transition_lr: float,
+                 eta_min: float = 0.0, current_step: int = None, verbose: bool = True):
+        self.optimizer = optimizer
+        self.initial_lr = initial_lr
+        self.max_steps = max_steps
+        self.transition_step = transition_step
+        self.transition_lr = transition_lr
+        self.eta_min = eta_min
+        self.verbose = verbose
+        self.ctr = 0
+        super().__init__(optimizer, current_step if current_step is not None else -1)
+
+    def step(self, current_step=None):
+        if current_step is None or current_step == -1:
+            current_step = self.ctr
+            self.ctr += 1
+
+        if current_step < self.transition_step:
+            new_lr = self.eta_min + (self.initial_lr - self.eta_min) * (
+                1 + math.cos(math.pi * current_step / self.transition_step)
+            ) / 2
+        else:
+            decay_steps = self.max_steps - self.transition_step
+            adjusted_step = current_step - self.transition_step
+            new_lr = self.eta_min + (self.transition_lr - self.eta_min) * (
+                1 + math.cos(math.pi * adjusted_step / decay_steps)
+            ) / 2
+
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = new_lr
         return new_lr
@@ -197,6 +282,24 @@ if __name__ == '__main__':
         Adam(model.parameters()),
         initial_lr=1e-3,
         max_steps=1000
+    )
+    data = []
+    for i in range(398):
+        val = lr_scheduler.step()
+        print(val)
+        data.append(val)
+    import matplotlib.pyplot as plt
+
+    plt.plot(data)
+    plt.show()
+
+    lr_scheduler = CosineAnnealingLRSchedulerTwoStage(
+        Adam(model.parameters()),
+        initial_lr=1e-3,
+        max_steps=1000,
+        transition_step=700,
+        transition_lr=1e-4,
+        eta_min=1e-6,
     )
     data = []
     for i in range(398):
