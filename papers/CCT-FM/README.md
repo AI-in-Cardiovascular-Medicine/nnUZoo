@@ -1,6 +1,6 @@
 # CCT-FM
 
-<img src="nnUZoo/papers/CCT-FM/assets/figure_1_overview.png">
+<img src="./assets/figure_1_overview.png">
 
 # Overview
 
