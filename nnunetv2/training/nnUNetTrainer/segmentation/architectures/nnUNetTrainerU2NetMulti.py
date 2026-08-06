@@ -21,6 +21,7 @@ class nnUNetTrainerU2NetMulti(nnUNetTrainer):
         self.freeze_encoder_epochs = -1  # training from scratch
         self.early_stop_epoch = 10
         self.spatial_dims: int = len(self.configuration_manager.patch_size)
+        self.autocast_dtype = torch.bfloat16
 
     @staticmethod
     def build_network_architecture(
