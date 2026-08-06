@@ -1,10 +1,133 @@
 # nnUZoo
 
-<img src="assets/main_img.jpg">
+<img src="nnUZoo-Assets/main_img.jpg">
 
 
 ## Contents
 
+- [Overview](#overview)
+  - [What nnUZoo adds to nnU-Net](#what-nnuzoo-adds-to-nnu-net)
+  - [The X2Net family](#the-x2net-family)
+  - [Requirements and installation](#requirements-and-installation)
+  - [Repository layout](#repository-layout)
+- [Preprocessing](#preprocessing)
+  - [1. Set the environment variables](#1-set-the-environment-variables)
+  - [2. Organize the raw dataset](#2-organize-the-raw-dataset)
+  - [3. Write `dataset.json`](#3-write-datasetjson)
+  - [4. Run fingerprinting, planning and preprocessing](#4-run-fingerprinting-planning-and-preprocessing)
+  - [5. What you get](#5-what-you-get)
+- [Training](#training)
+  - [Basic command](#basic-command)
+  - [Which model? Pick a trainer](#which-model-pick-a-trainer)
+  - [Useful flags](#useful-flags)
+  - [Output layout](#output-layout)
+  - [Self-supervised pretraining and fine-tuning](#self-supervised-pretraining-and-fine-tuning)
+- [Citation](#citation)
+
+
+## Overview
+
+nnUZoo is a model zoo and benchmarking framework for medical image segmentation, built directly on
+top of nnU-Net v2. It keeps nnU-Net's features and add so many other stuff to it, as an example you can have another *architecture* just with a swap:
+
+```bash
+nnUNetv2_train 998 3d_fullres 0 -tr nnUNetTrainerU2NetMultiSmall   # change -tr, change the model
+```
+
+Because every model is trained through the same plans, the same augmentation and the same schedule,
+the numbers you get out are directly comparable. That is one of the points of the framework: to test
+architectural claims — CNN vs. Transformer vs. Mamba — without the confound of differing training
+recipes. The two papers behind the repository ([Citation](#citation)) use it for exactly that, across
+microscopy, ultrasound, CT, MRI and PET, and for building a self-supervised cardiac CT foundation
+model on 60,000 unlabeled scans.
+
+The primary workflow is three commands:
+
+| Step | Command | Section |
+|:-----|:--------|:--------|
+| 1. Fingerprint, plan, preprocess | `nnUNetv2_plan_and_preprocess -d 998 -c 3d_fullres` | [Preprocessing](#preprocessing) |
+| 2. Train a model | `nnUNetv2_train 998 3d_fullres 0 -tr TRAINER` | [Training](#training) |
+| 3. Predict on new data | `nnUNetv2_predict -i IN -o OUT -d 998 -c 3d_fullres -tr TRAINER` | see `nnUNetv2_predict --help` |
+
+### What nnUZoo adds to nnU-Net
+
+- **~70 trainer classes** covering three architecture families — 30 segmentation architectures
+  (CNN, Transformer, Mamba/state-space), plus SSL and augmentation variants. All of them live under
+  [nnunetv2/training/nnUNetTrainer/](nnunetv2/training/nnUNetTrainer/) and are resolved by class
+  name, so adding your own model means dropping one file into that package. The full list is in
+  [Which model? Pick a trainer](#which-model-pick-a-trainer).
+- **The X²Net family** — five new architectures introduced by this work, described below.
+- **Self-supervised pretraining** — masked-autoencoder (MAE) trainers in
+  [ssl/](nnunetv2/training/nnUNetTrainer/ssl/) plus matching fine-tuning trainers in
+  [ssl_finetune/](nnunetv2/training/nnUNetTrainer/segmentation/ssl_finetune/), including
+  `_XXPercent` variants that subsample the training split for low-data experiments. See
+  [Self-supervised pretraining and fine-tuning](#self-supervised-pretraining-and-fine-tuning).
+- **Cardiac CT augmentation** — metal-artifact, step and motion simulation via the `ctaug`
+  library, wired up as
+  [data-augmentation trainer variants](nnunetv2/training/nnUNetTrainer/segmentation/variants/data_augmentation/).
+- **Extra preprocessing controls** — `--use_nii` to train straight from NIfTI without
+  preprocessing, resumable fingerprinting and preprocessing, and a `target_type` key in
+  `dataset.json` that lets the data loaders build non-segmentation targets.
+
+### The X²Net family
+
+X²Net takes U²Net's nested topology — a U-Net whose every stage is itself a small U-Net — and
+replaces the convolutional RSU blocks with Transformer or Mamba blocks, keeping the residual
+connections and deep supervision. The goal is nnU-Net-level accuracy at a fraction of the
+parameters.
+
+| Model | Block type | Baseline it derives from | Trainer |
+|:------|:-----------|:-------------------------|:--------|
+| UNETR²Net | UNETR transformer | UNETR | `nnUNetTrainerUNETR2Net` |
+| SwT²Net | Swin transformer | Swin-Transformer U-Net | `nnUNetTrainerSwT2Net` |
+| SS2D²Net | SS2D selective scan | Swin-UMamba | `nnUNetTrainerSSND2Net` |
+| AltM²Net | Alternating 1D Mamba scan | LightM-UNet | `nnUNetTrainerLM2Net` |
+| MambaND²Net | Multi-dimensional Mamba | MambaND | `nnUNetTrainerMambaND2Net` |
+
+Each has a `...P` variant (e.g. `nnUNetTrainerSSND2NetP`), the small/narrow configuration.
+In the benchmark, SS2D²Net reached accuracy statistically indistinguishable from nnU-Net and U²Net
+with fewer parameters, but took considerably longer to train — the efficiency/compute trade-off
+these models live on.
+
+<img src="nnUZoo-Assets/X2Net_graphs.png">
+
+### Requirements and installation
+
+- Python ≥ 3.10 (verified on 3.12), a CUDA GPU, and — for training — at least 24 GB of VRAM,
+  24 GB of RAM and 8 CPU cores. Inference is far lighter (~8 GB RAM).
+- Transformer and Mamba models are heavier than their parameter counts suggest, because activation
+  memory, not weights, dominates. If a model OOMs, reduce the patch or batch size rather than
+  trusting the planner's estimate, which is calibrated for plain nnU-Net.
+
+```bash
+git clone https://github.com/AI-in-Cardiovascular-Medicine/nnUZoo.git
+cd nnUZoo
+pip install .
+```
+
+Swin-UMamba is the exception: its `mamba-ssm` / `causal-conv1d` CUDA extensions pin torch 2.4 and
+need a separate environment. Follow [mamba_assets/README.md](./mamba_assets/) for that one.
+
+### Repository layout
+
+```
+nnunetv2/
+├── nets/                       # architecture definitions
+│   ├── segmentation/           #   U²Net, UNETR, Swin-UNETR, SegMamba, the X²Net models, ...
+│   ├── core/                   #   shared blocks (masking, patchify, ...)
+│   └── dynamic_network_architectures/
+├── training/nnUNetTrainer/     # one trainer class per model — this is what -tr selects
+│   ├── segmentation/architectures/   #   supervised segmentation models
+│   ├── segmentation/ssl_finetune/    #   fine-tuning from self-supervised weights
+│   ├── segmentation/variants/        #   augmentation / loss / schedule variants
+│   └── ssl/                          #   MAE pretraining
+├── experiment_planning/        # fingerprinting, planners, preprocessing entry points
+├── preprocessing/              # normalization, resampling, cropping
+├── inference/                  # sliding-window prediction
+└── evaluation/                 # Dice and friends, best-configuration search
+papers/                        # per-paper reproduction code and figures
+mamba_assets/                  # separate environment for Swin-UMamba
+```
 
 ## Preprocessing
 
